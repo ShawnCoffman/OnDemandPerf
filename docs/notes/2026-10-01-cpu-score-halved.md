@@ -57,3 +57,25 @@ change in the benchmark code that is not described in the README (there is no ea
 
 Until this is settled, **do not compare v0.5.0 CPU scores with earlier ones, and treat v0.5.0 CPU numbers as possibly understating
 the machine.** Disk and RAM results are not implicated.
+
+## First 0.6.0 run on the machine (2026-10-01, attended, built and run by the owner)
+
+| Metric | 0.5.0 (E-cores only?) | 0.6.0 |
+|---|---|---|
+| CPU single-thread | 95.7 MB/s | 182.1 MB/s |
+| CPU multithread | 1,588.6 MB/s | 3,196.6 MB/s |
+| RAM single worker copy / read / write | 5.9 / 11.2 / 10.4 GB/s | 15.4 / 30.1 / 20.7 GB/s |
+| RAM dependent-access latency | 100.2 ns | 82.2 ns |
+
+CPU is back at the 0.4.0 level (about 185 / 3,200). The single-threaded RAM numbers and latency, whose code did not change,
+moved the same way, which fits the same cause: the earlier run executed on slower cores. This is consistent with the
+efficiency-mode hypothesis but does **not** yet distinguish "the opt-out fixed it" from "an attended, idle run is simply fine".
+Still to do: repeat unattended / hidden and check whether the busy-CPU quality note fires and what `processPowerThrottling` says.
+
+New multithread RAM figures: read 87.5 GB/s, copy 41.3 GB/s (about 82.6 GB/s of bus traffic, close to the read figure, which is a
+useful self-consistency check). Both are near what dual-channel DDR5 can deliver; the DIMM speed is not captured yet, so they
+cannot be judged against a rated maximum.
+
+Disk: sequential read first pass 2,853 MB/s versus a 2,692 MB/s aggregate in 0.5.0, so on this drive re-reading the file did not
+inflate the number. Sequential write fell from 3,010 to 1,574 MB/s while random write held (320 to 318 MB/s); both writes are
+sub-second bursts and the sequential one is the noisiest figure here.
