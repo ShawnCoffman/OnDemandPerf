@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 
 namespace OnDemandPerf.Core;
 
@@ -55,4 +56,13 @@ internal static class WindowsNative
         IntPtr setting, [Out] byte[]? buffer, ref uint length);
     [DllImport("kernel32.dll")]
     internal static extern IntPtr LocalFree(IntPtr memory);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern uint GetSystemFirmwareTable(uint signature, uint tableId, [Out] byte[]? buffer, uint size);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "CreateFileW")]
+    internal static extern SafeFileHandle OpenDevice(string name, uint access, uint share, IntPtr security,
+        uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool DeviceIoControl(SafeFileHandle device, uint code, byte[]? input, uint inputSize,
+        [Out] byte[] output, uint outputSize, out uint returned, IntPtr overlapped);
 }

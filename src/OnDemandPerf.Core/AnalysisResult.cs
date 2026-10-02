@@ -2,7 +2,7 @@ namespace OnDemandPerf.Core;
 
 public sealed class AnalysisResult
 {
-    public string SchemaVersion { get; init; } = "2.0";
+    public string SchemaVersion { get; init; } = "2.1";
     public string ApplicationVersion { get; init; } = AppInfo.Version;
     public string RunId { get; init; } = Guid.NewGuid().ToString("N");
     public DateTimeOffset Timestamp { get; init; } = DateTimeOffset.Now;
@@ -26,6 +26,12 @@ public sealed record DeviceInfo(string ComputerName, string OperatingSystem, str
     public string? WindowsBuild { get; set; }
     public int? PhysicalCores { get; set; }
     public uint? SystemLogicalProcessors { get; set; }
+    /// <summary>Nominal (base) CPU clock from the registry, in MHz. Not a live or turbo frequency.</summary>
+    public uint? CpuBaseMhz { get; set; }
+    public HardwareInfo? Hardware { get; set; }
+    public InstalledMemory? InstalledMemory { get; set; }
+    /// <summary>The drive holding the disk-test directory, i.e. the drive the disk numbers describe.</summary>
+    public DriveIdentity? TestDrive { get; set; }
 }
 
 public sealed class TestEnvironment

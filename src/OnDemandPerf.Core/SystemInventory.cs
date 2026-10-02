@@ -5,7 +5,8 @@ namespace OnDemandPerf.Core;
 
 public static class SystemInventory
 {
-    public static DeviceInfo Collect(List<string> warnings)
+    /// <param name="diskDirectory">Directory the disk test will use; its drive is the one identified.</param>
+    public static DeviceInfo Collect(List<string> warnings, string diskDirectory)
     {
         string cpuName = "Unavailable";
         TryCollect("CPU name", warnings, () =>
@@ -58,6 +59,19 @@ public static class SystemInventory
             if (logical == 0) throw new InvalidOperationException("Logical processor count unavailable.");
             device.SystemLogicalProcessors = logical;
         });
+        TryCollect("CPU speed", warnings, () =>
+        {
+            using var cpu = Registry.LocalMachine.OpenSubKey(@"HARDWARE\DESCRIPTION\System\CentralProcessor\0");
+            if (cpu?.GetValue("~MHz") is int mhz && mhz > 0) device.CpuBaseMhz = (uint)mhz;
+        });
+        TryCollect("System firmware (SMBIOS)", warnings, () =>
+        {
+            var (hardware, memory) = Smbios.Collect();
+            device.Hardware = hardware;
+            device.InstalledMemory = memory;
+            if (memory.ModuleCount == 0) warnings.Add("RAM modules: the firmware reported no memory module details (common in virtual machines).");
+        });
+        TryCollect("Test drive", warnings, () => device.TestDrive = StorageIdentity.Collect(diskDirectory, warnings));
         return device;
     }
 

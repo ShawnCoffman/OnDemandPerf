@@ -1,4 +1,4 @@
-# Result schema 2.0
+# Result schema 2.1
 
 JSON is camelCase. Memory is in bytes, utilization in percent, MB = 1,000,000 bytes, GB = 1,000,000,000 bytes. Unavailable
 values are `null`. `Latest.json` and every file in `Results/` use the same schema; `/compact` removes indentation only.
@@ -23,6 +23,15 @@ A stage that did not run is `null`. A successful run can carry warnings.
 - `environment.processPowerThrottling`: whether the worker opted out of Windows efficiency mode (`OptedOut`, `Failed: ...`).
 - `disk.measurements[]`: `SequentialWrite`, `SequentialRead`, `RandomWrite`, `RandomRead`, each with operations, bytes, duration,
   `mBps`, `iops`, mean and p95 latency, `shortBurst`, `stopReason`. `SequentialRead` also has `filePasses` and `firstPassMBps`.
+
+## Hardware identity (2.1, additive)
+
+`device` gained, all nullable: `cpuBaseMhz` (registry nominal clock, not a live or turbo frequency), `hardware`
+(`manufacturer`, `model`, `family`, `biosVendor`, `biosVersion`, `biosDate`), `installedMemory` (`type` such as `DDR5`,
+`totalBytes`, `moduleCount`, `slotCount`, `ratedMts`, `configuredMts`, `modules[]` with `slot`, `sizeBytes`, `type`,
+`formFactor`, `ratedMts`, `configuredMts`, `manufacturer`, `partNumber`) and `testDrive` (`volume`, `model`, `firmware`,
+`busType`, `nvmeVersion`, `isSolidState`, `sizeBytes` of the volume). Placeholder firmware strings ("To Be Filled By O.E.M.")
+are null. Serial numbers are not collected. 2.0 readers keep working; the fields are simply absent in older files.
 
 ## Changes from 1.4 (breaking)
 

@@ -57,7 +57,7 @@ internal static class Program
                     try { cancellation.Cancel(); } catch (ObjectDisposedException) { }
             });
         store.Log($"INFO Run {result.RunId} started ({mode}), version {result.ApplicationVersion}");
-        try { result.Device = SystemInventory.Collect(result.Warnings); }
+        try { result.Device = SystemInventory.Collect(result.Warnings, diskDirectory); }
         catch (Exception ex) { result.Status = "Failed"; result.Errors.Add("Inventory: " + ex.Message); }
         using var activity = new ActivitySampler();
         try

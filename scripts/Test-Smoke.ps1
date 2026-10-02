@@ -52,7 +52,7 @@ Assert ($report.cpu.multiThread.passes.Count -eq 3) 'Expected three measured pas
 Assert ($report.cpu.multiThread.mBps -gt 0) 'Invalid CPU throughput.'
 Assert ($report.cpu.profileHash -match '^[0-9a-f]{8}$') 'Missing CPU profile fingerprint.'
 Assert ($report.cpu.multiThread.medianMBps -gt 0) 'Missing median pass rate.'
-Assert ($report.schemaVersion -eq '2.0') 'Wrong result schema.'
+Assert ($report.schemaVersion -eq '2.1') 'Wrong result schema.'
 Assert ($report.cpu.benchmarkVersion -eq 'deflate-v3') 'Incorrect benchmark version.'
 Assert ($report.cpu.outputVerified) 'Compression output was not verified.'
 Assert ($report.cpu.durationSeconds -lt 20) 'CPU stage exceeded safety budget.'

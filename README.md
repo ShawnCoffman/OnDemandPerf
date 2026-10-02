@@ -1,6 +1,6 @@
 # OnDemand Perf
 
-Windows tray utility with on-demand CPU, RAM and storage tests. Version 0.6.0 (prototype).
+Windows tray utility with on-demand CPU, RAM and storage tests. Version 0.7.0 (prototype).
 
 Documentation: [methodology](docs/methodology.md) (what each test measures and its limits) ·
 [result schema](docs/schema.md) · [changelog](CHANGELOG.md) · [working notes](docs/notes/).
@@ -23,6 +23,10 @@ while a test runs.
 - The panel distinguishes completed, incomplete, cancelled and failed tests. Open Results is disabled during a run.
 - `OnDemandPerf.exe /show` opens the panel immediately without starting a test; if a tray is already running, it raises that
   tray's panel. Launching without arguments stays quiet. The tray is single-instance per Windows session.
+- The top of the panel identifies the machine: system make/model and BIOS, CPU (cores, threads, base clock), RAM (size, DDR
+  generation, speed, module and slot count) and the drive under test (model, bus, NVMe version). It is read the first time the
+  panel opens and is also stored in every report. An amber line appears when that identity suggests a cause (a single RAM module,
+  RAM running below its rated speed, a spinning disk, USB storage).
 - After a run, the cards show CPU multithread MB/s, RAM copy GB/s and disk sequential-read MB/s (first full pass of the test
   file); the log and report keep every other measurement.
 
@@ -99,7 +103,7 @@ non-exportable current-user code-signing certificate; signatures are untimestamp
 This is a framework-dependent build requiring the .NET 10 Desktop Runtime; keep the whole `artifacts/OnDemandPerf` folder
 together. It is not a signed or self-contained production package.
 
-Not yet implemented: BIOS/make/model/serial, DIMM and storage-device inventory, CPU frequency/thermal sampling, comparison
+Not yet implemented: serial numbers (deliberately omitted), PCIe link speed, CPU frequency/thermal sampling, comparison
 against previous runs or a baseline, and a managed installer. Fixed inputs improve repeatability, but background activity, power
 policy, thermals, runtime updates and hardware configuration still affect results; fleet comparisons need broader validation.
 Interactive window and tray-menu behavior needs human acceptance testing.

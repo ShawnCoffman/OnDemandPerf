@@ -26,6 +26,30 @@ public static class TextReportWriter
         Line("Physical cores", result.Device?.PhysicalCores);
         Line("System logical processors", result.Device?.SystemLogicalProcessors);
         Line("Logical processors available to worker", result.Device?.LogicalProcessors);
+        Line("CPU base clock", result.Device?.CpuBaseMhz is { } mhz ? $"{mhz} MHz" : null);
+        text.AppendLine();
+        text.AppendLine("HARDWARE");
+        foreach (var line in HardwareSummary.Lines(result.Device)) Line(line.Label, line.Text);
+        var hardware = result.Device?.Hardware;
+        Line("Manufacturer", hardware?.Manufacturer);
+        Line("Model", hardware?.Model);
+        Line("Family", hardware?.Family);
+        Line("BIOS", hardware?.BiosVersion is null ? null : $"{hardware.BiosVendor} {hardware.BiosVersion} {hardware.BiosDate}".Trim());
+        if (result.Device?.InstalledMemory is { } installed)
+            foreach (var module in installed.Modules)
+                Line("RAM module " + (module.Slot ?? "?"),
+                    string.Join(" · ", new[]
+                    {
+                        $"{module.SizeBytes / 1073741824d:F0} GiB {module.Type ?? "unknown type"} {module.FormFactor}".Trim(),
+                        $"running {module.ConfiguredMts?.ToString() ?? "?"} / rated {module.RatedMts?.ToString() ?? "?"} MT/s",
+                        $"{module.Manufacturer} {module.PartNumber}".Trim()
+                    }.Where(part => part.Length > 0)));
+        if (result.Device?.TestDrive is { } drive)
+        {
+            Line("Drive firmware", drive.Firmware);
+            Line("Drive solid state", drive.IsSolidState is { } ssd ? (ssd ? "Yes" : "No") : null);
+        }
+        foreach (var hint in HardwareSummary.Hints(result.Device)) Line("Hardware note", hint);
         text.AppendLine();
         text.AppendLine("CONDITIONS BEFORE TEST");
         var environment = result.Environment;

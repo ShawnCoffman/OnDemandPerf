@@ -42,7 +42,8 @@ function Check-Cleanup {
 Finish (Start-Worker '/run' 'complete') 0
 $report = Get-Content -Raw (Join-Path $testRoot 'complete\Latest.json') | ConvertFrom-Json
 Assert ($report.durationSeconds -lt 60) 'Full analysis exceeded target.'
-Assert ($report.schemaVersion -eq '2.0') 'Wrong result schema.'
+Assert ($report.schemaVersion -eq '2.1') 'Wrong result schema.'
+Assert ($report.device.hardware -and $report.device.testDrive.busType) 'Hardware identity (SMBIOS / test drive) missing from the report.'
 Assert ($report.cpu.benchmarkVersion -eq 'deflate-v3') 'Wrong CPU profile.'
 Assert ($report.memory.benchmarkVersion -eq 'memory-v3') 'Wrong memory profile.'
 Assert ($report.disk.benchmarkVersion -eq 'disk-qd1-v3') 'Wrong disk profile.'

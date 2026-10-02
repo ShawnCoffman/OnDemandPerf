@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.0 (2026-10-01) — hardware identity
+
+Result schema 2.1 (additive, see `docs/schema.md`). Benchmark profiles are unchanged, so scores stay comparable with 0.6.0.
+
+### Added
+- System make, model and BIOS; RAM size, DDR generation, rated and running speed, module and slot count, vendor and part
+  number (SMBIOS); CPU base clock; test-drive model, firmware, bus type, SSD/HDD and NVMe specification version.
+- A "this machine" block at the top of the panel, read when the panel is first shown, plus a HARDWARE section in the text
+  report and an amber hint line (single RAM module, RAM below rated speed, spinning disk, USB storage).
+- Unit tests for the SMBIOS and storage parsers (hand-built byte buffers) and for the summary wording.
+
+### Changed
+- `SystemInventory.Collect` takes the disk-test directory so the right drive is identified.
+- Panel is taller (480x590) to fit the new block. `Test-Smoke.ps1` / `Test-FullAnalysis.ps1` expect schema 2.1.
+
 ## 0.6.0 (2026-10-01) — review fixes; written without a compiler, see `docs/notes/open-items.md`
 
 Result schema 2.0 (breaking, see `docs/schema.md`). Profiles: `deflate-v3` (unchanged), `memory-v3`, `disk-qd1-v3`.

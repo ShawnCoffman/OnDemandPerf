@@ -22,6 +22,10 @@ internal sealed class TestWindow : Form
     private readonly StageCard cpuCard = new() { Heading = "01 / CPU", Accent = PerfTheme.Green };
     private readonly StageCard ramCard = new() { Heading = "02 / RAM", Accent = PerfTheme.Purple };
     private readonly StageCard diskCard = new() { Heading = "03 / DISK", Accent = PerfTheme.Cyan };
+    private readonly Label[] systemValues = new Label[4];
+    private readonly Label systemHint = new() { Dock = DockStyle.Fill, AutoEllipsis = true, ForeColor = PerfTheme.Amber, Font = new Font("Segoe UI", 8) };
+    private readonly ToolTip tips = new();
+    private bool systemInfoRequested;
     private StageCard? activeCard;
     private Process? worker;
     private Task? runningTask;
@@ -39,7 +43,7 @@ internal sealed class TestWindow : Form
         Text = "OnDemand Perf";
         AutoScaleMode = AutoScaleMode.Dpi;
         Font = new Font("Segoe UI", 9);
-        ClientSize = new Size(480, 480);
+        ClientSize = new Size(480, 590);
         FormBorderStyle = FormBorderStyle.None;
         MaximizeBox = MinimizeBox = false;
         ShowInTaskbar = false;
@@ -49,8 +53,8 @@ internal sealed class TestWindow : Form
         ForeColor = PerfTheme.Text;
         Padding = new Padding(18);
         Icon = PerfTheme.LoadIcon();
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 10 };
-        foreach (var height in new[] { 42, 112, 48, 24, 8, 28 })
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 11 };
+        foreach (var height in new[] { 42, 112, 112, 48, 24, 8, 28 })
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 12));
@@ -86,14 +90,15 @@ internal sealed class TestWindow : Form
         var activityPanel = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = PerfTheme.Panel, ColumnCount = 1, RowCount = 1, Margin = new Padding(3, 0, 3, 0) };
         activityPanel.Controls.Add(output);
         layout.Controls.Add(header, 0, 0);
-        layout.Controls.Add(cards, 0, 1);
-        layout.Controls.Add(status, 0, 2);
-        layout.Controls.Add(elapsed, 0, 3);
-        layout.Controls.Add(progress, 0, 4);
-        layout.Controls.Add(new Label { Text = "ACTIVITY / RESULTS", Font = new Font("Consolas", 9, FontStyle.Bold), ForeColor = PerfTheme.Cyan, Dock = DockStyle.Fill, TextAlign = ContentAlignment.BottomLeft }, 0, 5);
-        layout.Controls.Add(activityPanel, 0, 6);
-        layout.Controls.Add(buttons, 0, 8);
-        layout.Controls.Add(new Label { Text = "ON DEMAND ONLY   ·   Close to hide, tests continue", ForeColor = PerfTheme.Muted, Font = new Font("Segoe UI", 8), Dock = DockStyle.Fill }, 0, 9);
+        layout.Controls.Add(BuildSystemPanel(), 0, 1);
+        layout.Controls.Add(cards, 0, 2);
+        layout.Controls.Add(status, 0, 3);
+        layout.Controls.Add(elapsed, 0, 4);
+        layout.Controls.Add(progress, 0, 5);
+        layout.Controls.Add(new Label { Text = "ACTIVITY / RESULTS", Font = new Font("Consolas", 9, FontStyle.Bold), ForeColor = PerfTheme.Cyan, Dock = DockStyle.Fill, TextAlign = ContentAlignment.BottomLeft }, 0, 6);
+        layout.Controls.Add(activityPanel, 0, 7);
+        layout.Controls.Add(buttons, 0, 9);
+        layout.Controls.Add(new Label { Text = "ON DEMAND ONLY   ·   Close to hide, tests continue", ForeColor = PerfTheme.Muted, Font = new Font("Segoe UI", 8), Dock = DockStyle.Fill }, 0, 10);
         Controls.Add(layout);
         output.Text = "Run one performance test to check CPU, RAM and disk.\r\n\r\nEach operation will appear here as it runs.";
         results.Enabled = File.Exists(Path.Combine(ResultStore.DefaultDirectory, "Latest.txt"));
@@ -104,6 +109,69 @@ internal sealed class TestWindow : Form
         FormClosing += (_, e) => { if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); } };
         KeyPreview = true;
         KeyDown += (_, e) => { if (e.KeyCode == Keys.Escape) { Hide(); e.Handled = true; } };
+    }
+
+    /// <summary>The "this machine" block: identity of the system, CPU, RAM and test drive, shown above the stage cards.</summary>
+    private Control BuildSystemPanel()
+    {
+        var panel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill, BackColor = PerfTheme.Panel, ColumnCount = 2, RowCount = 5,
+            Margin = new Padding(3, 0, 3, 6), Padding = new Padding(10, 6, 10, 4)
+        };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 56));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        for (int i = 0; i < 4; i++) panel.RowStyles.Add(new RowStyle(SizeType.Percent, 20));
+        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 20));
+        var labels = new[] { "SYSTEM", "CPU", "RAM", "DISK" };
+        for (int i = 0; i < 4; i++)
+        {
+            panel.Controls.Add(new Label
+            {
+                Text = labels[i], Dock = DockStyle.Fill, ForeColor = PerfTheme.Cyan, TextAlign = ContentAlignment.MiddleLeft,
+                Font = new Font("Consolas", 8, FontStyle.Bold)
+            }, 0, i);
+            systemValues[i] = new Label
+            {
+                Text = "Reading…", Dock = DockStyle.Fill, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = PerfTheme.Text, AccessibleName = labels[i] + " details"
+            };
+            panel.Controls.Add(systemValues[i], 1, i);
+        }
+        panel.Controls.Add(systemHint, 0, 4);
+        panel.SetColumnSpan(systemHint, 2);
+        return panel;
+    }
+
+    private void ShowSystem(DeviceInfo? device)
+    {
+        var lines = HardwareSummary.Lines(device);
+        for (int i = 0; i < systemValues.Length; i++)
+        {
+            systemValues[i].Text = lines[i].Text;
+            tips.SetToolTip(systemValues[i], lines[i].Text); // full text when the line is ellipsized
+        }
+        var hints = HardwareSummary.Hints(device);
+        systemHint.Text = hints.Count == 0 ? "" : "⚠ " + hints[0] + (hints.Count > 1 ? $" (+{hints.Count - 1} more)" : "");
+        tips.SetToolTip(systemHint, string.Join(Environment.NewLine, hints));
+    }
+
+    /// <summary>
+    /// Identity is cheap (firmware table, registry, two drive queries) and read-only, so it is read the first time the panel is
+    /// shown rather than at tray startup. It never touches the benchmark worker or its single-instance lock.
+    /// </summary>
+    private async Task LoadSystemInfoAsync()
+    {
+        DeviceInfo? device = null;
+        try { device = await Task.Run(() => SystemInventory.Collect([], DiskBenchmark.DefaultDirectory)); }
+        catch (Exception ex) { Append("Hardware details unavailable: " + ex.Message); }
+        if (!IsDisposed) ShowSystem(device);
+    }
+
+    protected override void OnVisibleChanged(EventArgs e)
+    {
+        base.OnVisibleChanged(e);
+        if (Visible && !systemInfoRequested) { systemInfoRequested = true; _ = LoadSystemInfoAsync(); }
     }
 
     internal void ShowNearTray()
@@ -199,6 +267,7 @@ internal sealed class TestWindow : Form
     private void ShowResult(AnalysisResult report)
     {
         activeCard = null;
+        if (report.Device is not null) ShowSystem(report.Device);
         var cpu = ResultSummary.CpuCard(report);
         var ram = ResultSummary.RamCard(report);
         var disk = ResultSummary.DiskCard(report);
@@ -271,7 +340,7 @@ internal sealed class TestWindow : Form
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) timer.Dispose();
+        if (disposing) { timer.Dispose(); tips.Dispose(); }
         base.Dispose(disposing);
     }
 }

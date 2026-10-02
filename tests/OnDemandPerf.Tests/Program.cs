@@ -129,7 +129,7 @@ Test("Result survives a JSON round trip with records and init-only lists", () =>
         original.Warnings.Add("something optional failed");
         File.WriteAllText(path, JsonSerializer.Serialize(original, ResultStore.JsonOptions));
         var loaded = ResultStore.Load(path);
-        Check(loaded.RunId == original.RunId && loaded.SchemaVersion == "2.0", "identity");
+        Check(loaded.RunId == original.RunId && loaded.SchemaVersion == "2.1", "identity");
         Check(loaded.Device?.ComputerName == "PC1" && loaded.Device.PhysicalCores == 4, "device record");
         Near(loaded.Cpu!.MultiThread!.MBps, 1588.6, 1e-9, "multithread MB/s");
         Check(loaded.Cpu.MultiThread.Passes.Count == 3 && loaded.Cpu.MultiThread.Passes[0].WorkerBytesProcessed.Length == 8, "cpu passes");
@@ -208,6 +208,200 @@ Test("TextReportWriter handles full and mostly empty results", () =>
     Check(full.Contains("CPU benchmark profile: deflate-v3 / " + CpuBenchmark.Profile), "profile line");
     string empty = TextReportWriter.Format(new AnalysisResult { Status = "Failed" });
     Check(empty.Contains("Status: Failed"), "empty result");
+});
+
+// ---- hardware identity ----
+// Builds one SMBIOS structure: formatted area of `length` bytes (type, length, handle, then fields) plus its string set.
+byte[] Structure(byte type, int length, Action<byte[]> fill, params string[] strings)
+{
+    var formatted = new byte[length];
+    formatted[0] = type; formatted[1] = (byte)length;
+    fill(formatted);
+    var bytes = new List<byte>(formatted);
+    foreach (var text in strings) { bytes.AddRange(System.Text.Encoding.ASCII.GetBytes(text)); bytes.Add(0); }
+    if (strings.Length == 0) bytes.Add(0);
+    bytes.Add(0);
+    return bytes.ToArray();
+}
+byte[] Dimm(string slot, ushort sizeMiB, byte type, ushort rated, ushort configured, byte formFactor = 9)
+{
+    return Structure(17, 0x28, f =>
+    {
+        BitConverter.GetBytes(sizeMiB).CopyTo(f, 0x0C);
+        f[0x0E] = formFactor; f[0x10] = 1; f[0x12] = type;
+        BitConverter.GetBytes(rated).CopyTo(f, 0x15);
+        f[0x17] = 2; f[0x1A] = 3;
+        BitConverter.GetBytes(configured).CopyTo(f, 0x20);
+    }, slot, "Kingston", "KF556C40-16");
+}
+byte[] Concat(params byte[][] parts) => parts.SelectMany(x => x).ToArray();
+
+byte[] LaptopTable() => Concat(
+    Structure(0, 0x18, f => { f[4] = 1; f[5] = 2; f[8] = 3; }, "LENOVO", "N3XET50W (1.25 )", "01/05/2024"),
+    Structure(1, 0x1B, f => { f[4] = 1; f[5] = 2; f[6] = 3; f[0x1A] = 4; }, "LENOVO", "21HD0012US", "ThinkPad T14 Gen 4", "ThinkPad T14 Gen 4"),
+    Dimm("DIMM A", 16384, 0x22, 5600, 4800),
+    Dimm("DIMM B", 16384, 0x22, 5600, 4800),
+    Dimm("DIMM C", 0, 0x22, 0, 0),
+    Structure(127, 4, _ => { }));
+
+Test("SMBIOS parser reads machine identity, DDR type, speeds and empty slots", () =>
+{
+    var (hardware, memory) = Smbios.Parse(LaptopTable());
+    Check(hardware.Manufacturer == "LENOVO" && hardware.Model == "21HD0012US", "system strings");
+    Check(hardware.Family == "ThinkPad T14 Gen 4", "family");
+    Check(hardware.BiosVersion == "N3XET50W (1.25 )" && hardware.BiosDate == "01/05/2024", "bios");
+    Check(memory.ModuleCount == 2 && memory.SlotCount == 3, $"modules/slots {memory.ModuleCount}/{memory.SlotCount}");
+    Check(memory.Type == "DDR5" && memory.TotalBytes == 32UL * 1024 * 1024 * 1024, "type and size");
+    Check(memory.RatedMts == 5600 && memory.ConfiguredMts == 4800, "speeds");
+    Check(memory.Modules[0].Manufacturer == "Kingston" && memory.Modules[0].PartNumber == "KF556C40-16" && memory.Modules[0].Slot == "DIMM A", "module strings");
+});
+Test("SMBIOS parser ignores firmware placeholders and falls back to the motherboard", () =>
+{
+    var table = Concat(
+        Structure(1, 0x1B, f => { f[4] = 1; f[5] = 2; }, "To Be Filled By O.E.M.", "System Product Name"),
+        Structure(2, 0x08, f => { f[4] = 1; f[5] = 2; }, "ASUSTeK COMPUTER INC.", "ROG STRIX Z790-E GAMING WIFI"));
+    var (hardware, memory) = Smbios.Parse(table);
+    Check(hardware.Manufacturer == "ASUSTeK COMPUTER INC." && hardware.Model == "ROG STRIX Z790-E GAMING WIFI", "board fallback");
+    Check(memory.ModuleCount == 0 && memory.SlotCount is null, "no memory structures");
+});
+Test("SMBIOS parser handles extended size and speed, KB sizes and malformed tables", () =>
+{
+    byte[] big = Structure(17, 0x5C, f =>
+    {
+        BitConverter.GetBytes((ushort)0x7FFF).CopyTo(f, 0x0C);
+        BitConverter.GetBytes(65536u).CopyTo(f, 0x1C);                 // 64 GiB extended size
+        f[0x0E] = 13; f[0x12] = 0x22;
+        BitConverter.GetBytes((ushort)0xFFFF).CopyTo(f, 0x15);
+        BitConverter.GetBytes(6400u).CopyTo(f, 0x54);                  // extended rated speed
+        BitConverter.GetBytes((ushort)0xFFFF).CopyTo(f, 0x20);
+        BitConverter.GetBytes(6000u).CopyTo(f, 0x58);                  // extended configured speed
+    }, "SODIMM 1");
+    var (_, memory) = Smbios.Parse(big);
+    Check(memory.TotalBytes == 64UL * 1024 * 1024 * 1024 && memory.RatedMts == 6400 && memory.ConfiguredMts == 6000, "extended fields");
+    Check(memory.Modules[0].FormFactor == "SODIMM", "form factor");
+    var kb = Smbios.Parse(Dimm("A", 0, 0x1A, 3200, 3200).Select((b, i) => b).ToArray()); // size 0 = empty
+    Check(kb.Memory.ModuleCount == 0, "empty slot is not a module");
+    var truncated = LaptopTable()[..60];
+    Smbios.Parse(truncated);                 // must not throw
+    Smbios.Parse([]);
+    Smbios.Parse([17, 0xFF, 0, 0, 0]);       // declared length past the end
+});
+Test("Smbios.Clean normalizes strings", () =>
+{
+    Check(Smbios.Clean("  Samsung   SSD  ") == "Samsung SSD", "whitespace");
+    Check(Smbios.Clean("Default string") is null && Smbios.Clean("To be filled by O.E.M.") is null && Smbios.Clean("  ") is null, "placeholders");
+});
+
+byte[] DeviceDescriptor(string? vendor, string product, string revision, int busType)
+{
+    var buffer = new byte[256];
+    int next = 40;
+    int Put(string? text)
+    {
+        if (text is null) return 0;
+        int at = next;
+        System.Text.Encoding.ASCII.GetBytes(text).CopyTo(buffer, at);
+        next += text.Length + 1;
+        return at;
+    }
+    BitConverter.GetBytes(Put(vendor)).CopyTo(buffer, 12);
+    BitConverter.GetBytes(Put(product)).CopyTo(buffer, 16);
+    BitConverter.GetBytes(Put(revision)).CopyTo(buffer, 20);
+    BitConverter.GetBytes(busType).CopyTo(buffer, 28);
+    return buffer;
+}
+Test("Storage descriptor parser extracts model, firmware and bus type", () =>
+{
+    var nvme = new DriveIdentity();
+    StorageIdentity.ParseDeviceDescriptor(DeviceDescriptor(null, "Samsung SSD 990 PRO 1TB", "4B2QJXD7", 17), 256, nvme);
+    Check(nvme.Model == "Samsung SSD 990 PRO 1TB" && nvme.Firmware == "4B2QJXD7" && nvme.BusType == "NVMe", "nvme");
+    var sata = new DriveIdentity();
+    StorageIdentity.ParseDeviceDescriptor(DeviceDescriptor("ATA", "CT500MX500SSD1", "M3CR046", 11), 256, sata);
+    Check(sata.Model == "CT500MX500SSD1" && sata.BusType == "SATA", "ATA vendor dropped");
+    var scsi = new DriveIdentity();
+    StorageIdentity.ParseDeviceDescriptor(DeviceDescriptor("WDC", "WD10EZEX-08WN4A0", "01.01A01", 11), 256, scsi);
+    Check(scsi.Model == "WDC WD10EZEX-08WN4A0", "useful vendor kept");
+    bool threw = false;
+    try { StorageIdentity.ParseDeviceDescriptor(new byte[256], 10, new DriveIdentity()); } catch (InvalidDataException) { threw = true; }
+    Check(threw, "short buffer rejected");
+    Check(StorageIdentity.BusTypeName(7) == "USB" && StorageIdentity.BusTypeName(999) == "Unknown", "bus names");
+});
+Test("NVMe identify parser reads version, model and firmware", () =>
+{
+    var buffer = new byte[8 + 40 + 4096];
+    BitConverter.GetBytes(40u).CopyTo(buffer, 24);      // ProtocolDataOffset
+    BitConverter.GetBytes(4096u).CopyTo(buffer, 28);    // ProtocolDataLength
+    int data = 8 + 40;
+    System.Text.Encoding.ASCII.GetBytes("Samsung SSD 990 PRO 1TB".PadRight(40)).CopyTo(buffer, data + 24);
+    System.Text.Encoding.ASCII.GetBytes("4B2QJXD7").CopyTo(buffer, data + 64);
+    BitConverter.GetBytes(0x00010400u).CopyTo(buffer, data + 80); // NVMe 1.4
+    var (version, model, firmware) = StorageIdentity.ParseNvmeIdentify(buffer, buffer.Length);
+    Check(version == "1.4" && model == "Samsung SSD 990 PRO 1TB" && firmware == "4B2QJXD7", $"{version}/{model}/{firmware}");
+    BitConverter.GetBytes(0x00020001u).CopyTo(buffer, data + 80);
+    Check(StorageIdentity.ParseNvmeIdentify(buffer, buffer.Length).Version == "2.0.1", "tertiary version");
+    BitConverter.GetBytes(0u).CopyTo(buffer, data + 80);
+    Check(StorageIdentity.ParseNvmeIdentify(buffer, buffer.Length).Version is null, "version zero is unknown");
+    bool threw = false;
+    try { StorageIdentity.ParseNvmeIdentify(buffer, 30); } catch (InvalidDataException) { threw = true; }
+    Check(threw, "short response rejected");
+    var query = StorageIdentity.NvmeIdentifyQuery();
+    Check(query.Length == 48 && BitConverter.ToInt32(query, 0) == 49 && BitConverter.ToInt32(query, 24) == 40, "query layout");
+});
+
+DeviceInfo LaptopDevice()
+{
+    var (hardware, memory) = Smbios.Parse(LaptopTable());
+    return new DeviceInfo("PC1", "Windows 11 Pro", "X64", "13th Gen Intel(R) Core(TM) i7-1355U", 12, ".NET 10")
+    {
+        PhysicalCores = 10, SystemLogicalProcessors = 12, CpuBaseMhz = 1700, Hardware = hardware, InstalledMemory = memory,
+        TestDrive = new DriveIdentity { Volume = @"C:\", Model = "Samsung SSD 990 PRO 1TB", BusType = "NVMe", NvmeVersion = "1.4", IsSolidState = true, SizeBytes = 1_000_204_886_016 }
+    };
+}
+Test("HardwareSummary writes one readable line each for system, CPU, RAM and disk", () =>
+{
+    var lines = HardwareSummary.Lines(LaptopDevice());
+    Check(lines.Select(l => l.Label).SequenceEqual(["SYSTEM", "CPU", "RAM", "DISK"]), "labels");
+    Check(lines[0].Text == "LENOVO ThinkPad T14 Gen 4 · 21HD0012US · BIOS N3XET50W (1.25 ) (01/05/2024)", lines[0].Text);
+    Check(lines[1].Text == "13th Gen Intel Core i7-1355U · 10 cores / 12 threads · 1.7 GHz base", lines[1].Text);
+    Check(lines[2].Text == "32 GB DDR5-4800 · 2 × 16 GB · 2 of 3 slots · rated 5600", lines[2].Text);
+    Check(lines[3].Text == "Samsung SSD 990 PRO 1TB · NVMe 1.4 · C: (1 TB)", lines[3].Text);
+});
+Test("HardwareSummary degrades gracefully when nothing is known", () =>
+{
+    var lines = HardwareSummary.Lines(null);
+    Check(lines.All(l => l.Text.Length > 0), "every line has text");
+    var bare = new DeviceInfo("PC2", "Windows", "X64", "Unavailable", 4, ".NET 10");
+    Check(HardwareSummary.Machine(bare) == "PC2" && HardwareSummary.Cpu(bare) == "Unavailable", "bare device");
+    Check(HardwareSummary.Ram(new InstalledMemory()) == "Module details unavailable", "no modules");
+});
+Test("HardwareSummary hints flag single-channel RAM, low RAM speed and spinning disks", () =>
+{
+    var single = LaptopDevice();
+    single.InstalledMemory!.Modules.RemoveAt(1); single.InstalledMemory.ModuleCount = 1;
+    single.TestDrive!.IsSolidState = false; single.TestDrive.BusType = "SATA"; single.TestDrive.NvmeVersion = null;
+    var hints = HardwareSummary.Hints(single);
+    Check(hints.Any(h => h.Contains("single module")), "single channel");
+    Check(hints.Any(h => h.Contains("XMP/EXPO")), "below rated");
+    Check(hints.Any(h => h.Contains("spinning")), "hdd");
+    Check(HardwareSummary.Disk(single.TestDrive).Contains("SATA HDD"), "sata hdd label");
+    var healthy = LaptopDevice();
+    healthy.InstalledMemory!.ConfiguredMts = 5600;
+    Check(HardwareSummary.Hints(healthy).Count == 0, "no hints for a healthy configuration");
+});
+Test("Hardware identity survives the JSON round trip and reaches the report", () =>
+{
+    var original = Sample();
+    original.Device!.Hardware = new HardwareInfo { Manufacturer = "LENOVO", Model = "21HD0012US" };
+    original.Device.InstalledMemory = LaptopDevice().InstalledMemory;
+    original.Device.TestDrive = LaptopDevice().TestDrive;
+    original.Device.CpuBaseMhz = 1700;
+    string json = JsonSerializer.Serialize(original, ResultStore.JsonOptions);
+    Check(json.Contains("\"nvmeVersion\": \"1.4\"") && json.Contains("\"configuredMts\": 4800"), "camelCase keys");
+    var loaded = JsonSerializer.Deserialize<AnalysisResult>(json, ResultStore.JsonOptions)!;
+    Check(loaded.Device!.InstalledMemory!.Modules.Count == 2 && loaded.Device.TestDrive!.NvmeVersion == "1.4" && loaded.Device.CpuBaseMhz == 1700, "round trip");
+    string report = TextReportWriter.Format(loaded);
+    Check(report.Contains("HARDWARE") && report.Contains("RAM module DIMM A") && report.Contains("Hardware note"), "report sections");
+    Check(ResultSummary.Lines(loaded).Any(l => l.StartsWith("Note — ")), "hints in summary");
 });
 
 Console.WriteLine($"\n{passed} passed, {failed} failed.");

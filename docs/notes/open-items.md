@@ -13,11 +13,17 @@
 - [ ] Check the multithread RAM figure responds as expected (compare against single-thread; try a single-channel config if one
       is available).
 
+## Hardware identity (0.7.0)
+
+- [x] Verified on the dev machine (Corsair i8200, i9-14900K, 2x32 GB DDR5-6400, Corsair MP600 CORE XT NVMe 1.4).
+- [ ] Try laptops (soldered LPDDR, OEM part-number models), a SATA SSD, a USB drive, a VM, and a RAID/Storage Spaces volume.
+- [ ] PCIe link generation and width for NVMe (not exposed through the identify data used here).
+
 ## Product ideas, in rough priority order
 
 1. Compare with previous runs on this machine (history is already kept) and an optional per-model baseline with Pass/Warn.
 2. "Likely causes" section from data already captured (battery, power plan, baseline CPU, low RAM, high variance, low busy-CPU).
-3. Hardware identity: make, model, serial, BIOS, RAM speed and DIMM count, storage model and bus type.
+3. ~~Hardware identity~~ done in 0.7.0 (serial numbers deliberately left out).
 4. Frequency / thermal sampling (the `% Processor Performance` counter is the candidate; `CallNtPowerInformation` current MHz is
    unreliable on modern CPUs).
 5. Move static method text (`method`, `cachePolicy`, `dataset`, notes) out of every JSON record behind the profile id.

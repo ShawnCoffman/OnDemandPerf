@@ -52,6 +52,7 @@ public static class ResultSummary
     public static IReadOnlyList<string> Lines(AnalysisResult result)
     {
         var lines = new List<string>();
+        foreach (var hint in HardwareSummary.Hints(result.Device)) lines.Add("Note — " + hint);
         if (result.Cpu is { } cpu)
         {
             if (cpu.SingleThread is { } single) lines.Add($"CPU single-thread: {Number(single.MBps)} MB/s");

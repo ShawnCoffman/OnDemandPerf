@@ -96,6 +96,25 @@ cache. Hardware caches, controller or SAN caches, filters, deduplication and fir
 Not covered: queue depths above 1, sustained writes, device health, and low-space or very large-cache systems (these need fleet
 validation).
 
+## Hardware identity
+
+Collected without administrator rights or WMI, and reported as null (with a warning) when unavailable. Nothing here is a
+measurement; it lets results be grouped by model and read against what the hardware should do.
+
+- **System, BIOS, RAM modules**: parsed from the firmware's SMBIOS table (`GetSystemFirmwareTable`). Memory type (DDR4, DDR5,
+  LPDDR5, ...), rated and configured speed in MT/s, size, form factor, vendor and part number come from each Memory Device
+  record; empty slots count toward `slotCount`. Boards that leave the system strings as placeholders fall back to the
+  motherboard record. Speeds are what the firmware reports, so a BIOS that reports MHz instead of MT/s, or a virtual machine
+  with no module data, will show that.
+- **Test drive**: the physical disk behind the disk-test directory, found through the volume's device number and queried with
+  read-only storage property requests over a zero-access handle. Model, firmware and bus type come from the storage
+  descriptor, SSD versus HDD from the seek-penalty property, and for NVMe the controller's specification version from its
+  Identify Controller data. The size is the volume capacity because the raw disk length needs administrator access. Drives behind
+  a RAID controller, Storage Spaces or a virtualization layer may report the controller instead of the drive.
+- **CPU base clock**: the registry's nominal MHz. It says nothing about turbo or current frequency.
+- **Hints**: the panel and report flag a single module in a multi-slot machine (likely single-channel), RAM configured more than
+  5% below its rated speed (an XMP/EXPO profile may be off), a spinning disk, and USB storage. They are prompts, not diagnoses.
+
 ## Environment and activity
 
 Inventory: computer name, Windows product name, edition, release and build, architecture, CPU name, active physical cores,
