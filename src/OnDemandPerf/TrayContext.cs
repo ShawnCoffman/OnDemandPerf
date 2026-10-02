@@ -8,9 +8,17 @@ internal sealed class TrayContext : ApplicationContext
     private readonly NotifyIcon icon;
     private readonly Icon trayIcon = PerfTheme.LoadIcon();
     private readonly TestWindow window = new();
+    private readonly Control marshal = new();
+    private readonly RegisteredWaitHandle showRegistration;
 
-    public TrayContext()
+    public TrayContext(EventWaitHandle showSignal)
     {
+        _ = marshal.Handle; // force handle creation on the UI thread so other threads can post work to it
+        showRegistration = ThreadPool.RegisterWaitForSingleObject(showSignal, (_, _) =>
+        {
+            try { marshal.BeginInvoke(new Action(ShowWindow)); }
+            catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException) { }
+        }, null, Timeout.Infinite, false);
         var menu = new ContextMenuStrip
         {
             BackColor = PerfTheme.Panel, ForeColor = PerfTheme.Text,
@@ -25,6 +33,11 @@ internal sealed class TrayContext : ApplicationContext
         menu.Items.Add("Exit", null, async (_, _) => { menu.Enabled = false; await window.StopAsync(); ExitThread(); });
         icon = new NotifyIcon { Icon = trayIcon, Text = "OnDemand Perf — ready", ContextMenuStrip = menu, Visible = true };
         icon.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) ShowWindow(); };
+        window.RunCompleted += (_, summary) =>
+        {
+            // The panel can be hidden while a test runs, so tell the user when it finishes.
+            if (!window.Visible) icon.ShowBalloonTip(6000, "OnDemand Perf", summary.Length > 250 ? summary[..250] : summary, ToolTipIcon.Info);
+        };
         window.StateChanged += (_, _) =>
         {
             run.Enabled = !window.IsRunning;
@@ -49,7 +62,7 @@ internal sealed class TrayContext : ApplicationContext
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { icon.Visible = false; icon.ContextMenuStrip?.Dispose(); icon.Dispose(); trayIcon.Dispose(); window.Dispose(); }
+        if (disposing) { showRegistration.Unregister(null); marshal.Dispose(); icon.Visible = false; icon.ContextMenuStrip?.Dispose(); icon.Dispose(); trayIcon.Dispose(); window.Dispose(); }
         base.Dispose(disposing);
     }
 }

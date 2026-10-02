@@ -6,8 +6,8 @@ namespace OnDemandPerf.Core;
 public sealed class ActivityResult
 {
     public string Method { get; init; } = "Approximately one sample per second; system CPU includes the benchmark; observational context, not a thermal diagnosis";
-    public List<ActivitySample> Samples { get; } = [];
-    public List<string> Notes { get; } = [];
+    public List<ActivitySample> Samples { get; init; } = [];
+    public List<string> Notes { get; init; } = [];
 }
 public sealed record ActivitySample(double ElapsedSeconds, double IntervalSeconds, string Stage,
     double? SystemCpuPercent, ulong? AvailableMemoryBytes, string PowerSource);

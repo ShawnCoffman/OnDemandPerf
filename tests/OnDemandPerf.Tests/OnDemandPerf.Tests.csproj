@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Dependency-free test runner (no NuGet packages: the repo's NuGet.Config has no feeds). Exit code 1 on any failure. -->
+  <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../../src/OnDemandPerf.Core/OnDemandPerf.Core.csproj" /></ItemGroup>
+</Project>

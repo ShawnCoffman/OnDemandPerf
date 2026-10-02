@@ -1,3 +1,4 @@
+param([switch]$Keep)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $exe = Join-Path $root 'artifacts\OnDemandPerf\worker\OnDemandPerf.Worker.exe'
@@ -46,8 +47,11 @@ Assert ($cpu.StandardOutput.ReadLine().Contains('Sampling')) 'CPU worker failed 
 Finish-Worker (Start-Worker '/inventory' (Join-Path $testRoot 'overlap')) 3
 Finish-Worker $cpu 0
 $report = Get-Content -Raw "$cpuPath\Latest.json" | ConvertFrom-Json
-Assert ($report.cpu.passes.Count -eq 3) 'Expected three measured passes.'
-Assert ($report.cpu.compressionMBps -gt 0) 'Invalid CPU throughput.'
+Assert ($report.cpu.multiThread.passes.Count -eq 3) 'Expected three measured passes.'
+Assert ($report.cpu.multiThread.mBps -gt 0) 'Invalid CPU throughput.'
+Assert ($report.cpu.profileHash -match '^[0-9a-f]{8}$') 'Missing CPU profile fingerprint.'
+Assert ($report.cpu.multiThread.medianMBps -gt 0) 'Missing median pass rate.'
+Assert ($report.schemaVersion -eq '2.0') 'Wrong result schema.'
 Assert ($report.cpu.benchmarkVersion -eq 'deflate-v3') 'Incorrect benchmark version.'
 Assert ($report.cpu.outputVerified) 'Compression output was not verified.'
 Assert ($report.cpu.durationSeconds -lt 20) 'CPU stage exceeded safety budget.'
@@ -69,7 +73,7 @@ foreach ($stage in @($report.cpu.singleThread, $report.cpu.multiThread)) {
     Assert ([math]::Abs($stage.mBps - $sumBytes / $sumSeconds / 1000000) -lt 0.001) 'Stage aggregation mismatch.'
 }
 Assert ($report.cpu.singleThread.requestedWorkers -eq 1) 'Single-thread test used multiple workers.'
-foreach ($pass in $report.cpu.passes) {
+foreach ($pass in $report.cpu.multiThread.passes) {
     Assert ($pass.bytesProcessed -gt 0 -and $pass.durationSeconds -ge 3) 'Invalid pass measurement.'
     Assert ([math]::Abs($pass.mBps - ($pass.bytesProcessed / $pass.durationSeconds / 1000000)) -lt 0.001) 'Throughput accounting mismatch.'
 }
@@ -114,6 +118,7 @@ try {
     $tray.Refresh()
     Write-Host "Tray working set: $([math]::Round($tray.WorkingSet64 / 1MB, 1)) MiB; CPU time over 3 seconds: $($tray.TotalProcessorTime.TotalMilliseconds - $cpuBefore) ms."
 } finally { if (-not $tray.HasExited) { $tray.Kill(); $tray.WaitForExit() }; $tray.Dispose() }
-Write-Host "PASS: inventory, CPU accounting, overlap prevention, cancellation, bad arguments, output failure, idle tray. Results: $testRoot"
+if ($Keep) { Write-Host "Results kept: $testRoot" } else { Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue }
+Write-Host 'PASS: inventory, CPU accounting, overlap prevention, cancellation, bad arguments, output failure, idle tray.'
 
 

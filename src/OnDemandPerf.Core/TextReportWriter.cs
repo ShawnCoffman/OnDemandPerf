@@ -39,10 +39,14 @@ public static class TextReportWriter
         Line("Battery present", environment?.BatteryPresent is { } present ? (present ? "Yes" : "No") : null);
         Line("Battery charge", environment?.BatteryChargePercent is { } charge ? $"{charge}%" : null);
         Line("Power plan", environment?.PowerPlan);
+        Line("Process efficiency-mode opt-out", environment?.ProcessPowerThrottling);
         text.AppendLine();
-        Line("CPU benchmark version", result.Cpu?.BenchmarkVersion);
+        Line("CPU benchmark profile", result.Cpu is null ? null : $"{result.Cpu.BenchmarkVersion} / {result.Cpu.ProfileHash}");
+        Line("CPU stage status", result.Cpu?.Status);
         Line("CPU Compression (single-thread)", Number(result.Cpu?.SingleThread?.MBps, " MB/s"));
         Line("CPU Compression (multithread)", Number(result.Cpu?.MultiThread?.MBps, " MB/s"));
+        Line("CPU single-thread median pass", Number(result.Cpu?.SingleThread?.MedianMBps, " MB/s"));
+        Line("CPU multithread median pass", Number(result.Cpu?.MultiThread?.MedianMBps, " MB/s"));
         Line("Single-thread pass variation (CV)", Number(result.Cpu?.SingleThread?.VariationPercent, "%"));
         Line("Multithread pass variation (CV)", Number(result.Cpu?.MultiThread?.VariationPercent, "%"));
         Line("Multithread first-to-last change", Number(result.Cpu?.MultiThread?.FirstToLastChangePercent, "%"));
@@ -54,10 +58,16 @@ public static class TextReportWriter
         {
             text.AppendLine(); text.AppendLine("RAM — APPLICATION THROUGHPUT");
             Line("Status", ram.Status);
+            Line("RAM profile", $"{ram.BenchmarkVersion} / {ram.ProfileHash}");
             Line("Buffer size (each of two)", Number(ram.BufferBytes / 1048576d, " MiB"));
             Line("Memory Copy", Number(ram.CopyGBps, " GB/s"));
             Line("Memory Read", Number(ram.ReadGBps, " GB/s"));
             Line("Memory Write", Number(ram.WriteGBps, " GB/s"));
+            if (ram.MultiThreadWorkers is { } mtWorkers)
+            {
+                Line($"Memory Read, {mtWorkers} workers", Number(ram.MultiThreadReadGBps, " GB/s"));
+                Line($"Memory Copy, {mtWorkers} workers", Number(ram.MultiThreadCopyGBps, " GB/s"));
+            }
             foreach (var (operation, variation) in ram.VariationPercent) Line($"RAM {operation} pass variation (CV)", Number(variation, "%"));
             if (ram.Latency is { } latency)
             {
@@ -74,12 +84,14 @@ public static class TextReportWriter
         if (result.Disk is { } disk)
         {
             text.AppendLine(); text.AppendLine("STORAGE — DIRECT I/O, QUEUE DEPTH 1");
-            Line("Status", disk.Status); Line("Test volume", disk.Volume); Line("File system", disk.FileSystem);
+            Line("Status", disk.Status); Line("Disk profile", $"{disk.BenchmarkVersion} / {disk.ProfileHash}"); Line("Test volume", disk.Volume); Line("File system", disk.FileSystem);
             Line("Test file", Number(disk.FileBytes / 1048576d, " MiB"));
             Line("Total written", Number(disk.TotalBytesWritten / 1048576d, " MiB"));
             foreach (var test in disk.Measurements)
             {
                 Line(test.Operation, $"{Number(test.MBps, " MB/s")}; {test.Status}; {test.Operations} operations in {test.DurationSeconds:F3}s; {test.StopReason}");
+                if (test.FirstPassMBps is { } firstPass)
+                    Line("  First full pass of test file", $"{Number(firstPass, " MB/s")} (file read {test.FilePasses?.ToString("F1", CultureInfo.InvariantCulture)} times in total)");
                 if (test.ShortBurst) Line("  Sample quality", "Short burst (<1 second); not sustained performance");
                 if (test.BlockBytes == 4096)
                     Line("  IOPS / average / p95 latency", $"{test.Iops:F0} / {test.MeanLatencyMs:F3} ms / {test.P95LatencyMs:F3} ms");

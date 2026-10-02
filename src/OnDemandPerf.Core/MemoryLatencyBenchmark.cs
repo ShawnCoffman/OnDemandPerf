@@ -5,6 +5,11 @@ namespace OnDemandPerf.Core;
 
 public static class MemoryLatencyBenchmark
 {
+    internal const int PassCount = 3;
+    internal const int PassMilliseconds = 1250;
+    internal const int NodeStride = 16; // ints, i.e. 64 bytes
+    public static string Profile { get; } = ProfileHash.Compute("dependent-access-v1", PassCount, PassMilliseconds, NodeStride * 4);
+
     public static void Run(byte[] buffer, MemoryLatencyResult result, CancellationToken token, Action<string> progress)
     {
         var total = Stopwatch.StartNew();
@@ -12,7 +17,7 @@ public static class MemoryLatencyBenchmark
         {
             progress("RAM latency: building and verifying a dependent random-access chain...");
             var links = MemoryMarshal.Cast<byte, int>(buffer.AsSpan());
-            const int stride = 16;
+            const int stride = NodeStride;
             int nodes = links.Length / stride;
             if (nodes < 2) throw new ArgumentException("Working set too small.");
             for (int i = 0; i < nodes; i++)
@@ -38,9 +43,9 @@ public static class MemoryLatencyBenchmark
             if (index != 0) throw new InvalidDataException("Latency chain did not close.");
             result.CycleVerified = true;
             // Full-chain verification also warms the traversal before the timed passes.
-            for (int pass = 1; pass <= 3; pass++)
+            for (int pass = 1; pass <= PassCount; pass++)
             {
-                progress($"RAM latency: dependent accesses, pass {pass} of 3...");
+                progress($"RAM latency: dependent accesses, pass {pass} of {PassCount}...");
                 long accesses = 0;
                 var watch = Stopwatch.StartNew();
                 do
@@ -48,15 +53,14 @@ public static class MemoryLatencyBenchmark
                     token.ThrowIfCancellationRequested();
                     for (int i = 0; i < 4096; i++) index = links[index];
                     accesses += 4096;
-                } while (watch.ElapsedMilliseconds < 1250);
+                } while (watch.ElapsedMilliseconds < PassMilliseconds);
                 watch.Stop();
                 token.ThrowIfCancellationRequested();
                 result.Passes.Add(new(pass, accesses, watch.Elapsed.TotalSeconds, watch.Elapsed.TotalNanoseconds / accesses));
             }
             GC.KeepAlive(index);
             result.NanosecondsPerAccess = result.Passes.Sum(p => p.DurationSeconds) * 1e9 / result.Passes.Sum(p => p.Accesses);
-            double mean = result.Passes.Average(p => p.NanosecondsPerAccess);
-            result.VariationPercent = Math.Sqrt(result.Passes.Average(p => Math.Pow(p.NanosecondsPerAccess - mean, 2))) / mean * 100;
+            result.VariationPercent = Stats.VariationPercent(result.Passes.Select(p => p.NanosecondsPerAccess).ToArray());
             result.Status = "Success";
         }
         catch (OperationCanceledException) { result.Status = "CancelledOrTimedOut"; throw; }

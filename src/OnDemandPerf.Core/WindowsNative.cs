@@ -20,6 +20,18 @@ internal static class WindowsNative
         internal uint BatteryLifeTime, BatteryFullLifeTime;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct ProcessPowerThrottlingState
+    {
+        internal uint Version, ControlMask, StateMask;
+    }
+
+    [DllImport("kernel32.dll")]
+    internal static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SetProcessInformation(IntPtr process, int informationClass,
+        ref ProcessPowerThrottlingState information, uint size);
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool GlobalMemoryStatusEx(ref MemoryStatus status);

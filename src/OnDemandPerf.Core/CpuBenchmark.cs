@@ -6,28 +6,41 @@ namespace OnDemandPerf.Core;
 
 public static class CpuBenchmark
 {
+    internal const int InputBytes = 1024 * 1024;
+    internal const int WarmupMilliseconds = 250;
+    internal const int SingleMilliseconds = 1800;
+    internal const int MultiMilliseconds = 3000;
+    internal const int PassCount = 3;
+    internal const int BudgetSeconds = 20;
+    public const string DatasetId = "xorshift32-seed-12345678-repeated-64KiB-v1";
+    public static string Profile { get; } = ProfileHash.Compute("deflate-v3", DatasetId, InputBytes, WarmupMilliseconds,
+        SingleMilliseconds, MultiMilliseconds, PassCount, "Optimal");
+
     public static CpuResult Run(CancellationToken cancellationToken, Action<string> progress)
     {
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        budget.CancelAfter(TimeSpan.FromSeconds(20));
+        budget.CancelAfter(TimeSpan.FromSeconds(BudgetSeconds));
         var timer = Stopwatch.StartNew();
         var result = new CpuResult { WorkerCount = Environment.ProcessorCount };
-        var data = CreateDataset(result.InputBytesPerOperation);
+        var data = CreateDataset(InputBytes);
         try
         {
-            result.SingleThread = MeasureStage(data, 1, 1800, "Single-thread", budget.Token, progress);
-            result.MultiThread = MeasureStage(data, result.WorkerCount, 3000, "Multithread", budget.Token, progress);
+            // A stage is assigned only when all of its passes finish, so a timeout never exposes a partial aggregate.
+            result.SingleThread = MeasureStage(data, 1, SingleMilliseconds, "Single-thread", budget.Token, progress);
+            result.MultiThread = MeasureStage(data, result.WorkerCount, MultiMilliseconds, "Multithread", budget.Token, progress);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            throw new TimeoutException("CPU stage exceeded its 20-second safety budget; no complete score was produced.");
+            // A busy or slow machine is exactly when a partial answer is most useful: keep completed stages, flag the rest.
+            result.Status = "TimedOut";
+            result.QualityNotes.Add($"CPU stage exceeded its {BudgetSeconds}-second safety budget; the unfinished stage has no score and completed stages are kept.");
         }
-        result.CompressionMBps = result.MultiThread.MBps;
-        result.Passes.AddRange(result.MultiThread.Passes);
-        result.OutputVerified = true;
+        result.OutputVerified = result.SingleThread is not null && result.MultiThread is not null;
         result.DurationSeconds = timer.Elapsed.TotalSeconds;
         foreach (var (name, stage) in new[] { ("Single-thread", result.SingleThread), ("Multithread", result.MultiThread) })
         {
+            if (stage is null) continue;
+            if (UtilizationNote(name, stage) is { } utilization) result.QualityNotes.Add(utilization);
             if (stage.VariationPercent > 5)
                 result.QualityNotes.Add($"{name}: pass variation exceeded the provisional 5% noise threshold; consider retesting.");
             if (stage.FirstToLastChangePercent < -10)
@@ -36,20 +49,35 @@ public static class CpuBenchmark
         return result;
     }
 
+    /// <summary>
+    /// Flags a stage whose workers got far less CPU time than requested. In saved results, a multithread stage with 32 workers
+    /// averaged only about 15.5 busy logical processors while its score halved, which is what running only on slower cores or
+    /// under efficiency mode looks like.
+    /// </summary>
+    internal static string? UtilizationNote(string name, CpuMeasurement stage)
+    {
+        if (stage.Passes.Count == 0 || stage.RequestedWorkers < 1) return null;
+        double busy = stage.Passes.Average(p => p.AverageBusyLogicalProcessors);
+        if (busy >= stage.RequestedWorkers * 0.75) return null;
+        return $"{name}: {stage.RequestedWorkers} worker(s) averaged only {busy:F1} busy logical processors; the process may have been throttled or restricted " +
+            "(efficiency mode, affinity or CPU-set limits, or scheduling onto slower cores), so this score may understate the machine.";
+    }
+
     private static CpuMeasurement MeasureStage(byte[] data, int workers, int milliseconds, string name,
         CancellationToken token, Action<string> progress)
     {
         var stage = new CpuMeasurement { RequestedWorkers = workers, RequestedMillisecondsPerPass = milliseconds };
-        for (int pass = 1; pass <= 3; pass++)
+        for (int pass = 1; pass <= PassCount; pass++)
         {
             token.ThrowIfCancellationRequested();
-            progress($"{name} compression: pass {pass} of 3 (warmup, measure, verify)...");
+            progress($"{name} compression: pass {pass} of {PassCount} (warmup, measure, verify)...");
             stage.Passes.Add(Measure(data, workers, milliseconds, pass, token));
         }
+        var rates = stage.Passes.Select(p => p.MBps).ToArray();
         stage.MBps = stage.Passes.Sum(p => p.BytesProcessed) / stage.Passes.Sum(p => p.DurationSeconds) / 1_000_000;
-        double mean = stage.Passes.Average(p => p.MBps);
-        stage.VariationPercent = Math.Sqrt(stage.Passes.Average(p => Math.Pow(p.MBps - mean, 2))) / mean * 100;
-        stage.FirstToLastChangePercent = (stage.Passes[^1].MBps / stage.Passes[0].MBps - 1) * 100;
+        stage.MedianMBps = Stats.Median(rates);
+        stage.VariationPercent = Stats.VariationPercent(rates);
+        stage.FirstToLastChangePercent = (rates[^1] / rates[0] - 1) * 100;
         return stage;
     }
 
@@ -79,7 +107,7 @@ public static class CpuBenchmark
                     {
                         using var output = new MemoryStream(data.Length + 65536);
                         var warmup = Stopwatch.StartNew();
-                        do { Compress(data, output, stop.Token); } while (warmup.ElapsedMilliseconds < 250);
+                        do { Compress(data, output, stop.Token); } while (warmup.ElapsedMilliseconds < WarmupMilliseconds);
                         ready.Signal();
                         gate.Wait(stop.Token);
                         long localBytes = 0;

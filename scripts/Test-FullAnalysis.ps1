@@ -1,3 +1,4 @@
+param([switch]$Keep)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $exe = Join-Path $root 'artifacts\OnDemandPerf\worker\OnDemandPerf.Worker.exe'
@@ -40,10 +41,11 @@ function Check-Cleanup {
 Finish (Start-Worker '/run' 'complete') 0
 $report = Get-Content -Raw (Join-Path $testRoot 'complete\Latest.json') | ConvertFrom-Json
 Assert ($report.durationSeconds -lt 60) 'Full analysis exceeded target.'
-Assert ($report.schemaVersion -eq '1.4') 'Wrong result schema.'
+Assert ($report.schemaVersion -eq '2.0') 'Wrong result schema.'
 Assert ($report.cpu.benchmarkVersion -eq 'deflate-v3') 'Wrong CPU profile.'
-Assert ($report.memory.benchmarkVersion -eq 'memory-v2') 'Wrong memory profile.'
-Assert ($report.disk.benchmarkVersion -eq 'disk-qd1-v2') 'Wrong disk profile.'
+Assert ($report.memory.benchmarkVersion -eq 'memory-v3') 'Wrong memory profile.'
+Assert ($report.disk.benchmarkVersion -eq 'disk-qd1-v3') 'Wrong disk profile.'
+foreach ($stage in @($report.cpu, $report.memory, $report.disk)) { Assert ($stage.profileHash -match '^[0-9a-f]{8}$') 'Missing profile fingerprint.' }
 Assert ($report.activity.samples.Count -gt 10) 'Missing activity timeline.'
 foreach ($sample in $report.activity.samples) {
     Assert ($sample.intervalSeconds -gt 0) 'Invalid activity sample interval.'
@@ -58,12 +60,20 @@ foreach ($pass in $report.memory.latency.passes) {
 $latencyTime = ($report.memory.latency.passes | Measure-Object durationSeconds -Sum).Sum
 $accesses = ($report.memory.latency.passes | Measure-Object accesses -Sum).Sum
 Assert ([math]::Abs($report.memory.latency.nanosecondsPerAccess - $latencyTime * 1e9 / $accesses) -lt .0001) 'Latency aggregate mismatch.'
-Assert (@($report.memory.variationPercent.PSObject.Properties).Count -eq 3) 'Missing memory variation.'
+$multi = [Environment]::ProcessorCount -ge 2
+$variations = if ($multi) { 5 } else { 3 }
+Assert (@($report.memory.variationPercent.PSObject.Properties).Count -eq $variations) 'Missing memory variation.'
+if ($multi) {
+    Assert ($report.memory.multiThreadWorkers -ge 2) 'Multithread RAM pass did not run.'
+    Assert ($report.memory.multiThreadReadGBps -gt 0 -and $report.memory.multiThreadCopyGBps -gt 0) 'Missing multithread RAM rates.'
+}
 Assert ($report.cpu.outputVerified) 'CPU stage failed.'
-Assert ($report.memory.passes.Count -eq 9) 'RAM did not complete all nine passes.'
+$expectedPasses = if ($multi) { 15 } else { 9 }
+Assert ($report.memory.passes.Count -eq $expectedPasses) "RAM did not complete all $expectedPasses passes."
 foreach ($pass in $report.memory.passes) {
     Assert ($pass.verified) 'RAM verification failed.'
-    Assert ($pass.bytesProcessed -gt 0 -and $pass.durationSeconds -ge .9) 'Invalid RAM pass.'
+    $minimum = if ($pass.operation -like '*MT') { .4 } else { .9 }
+    Assert ($pass.bytesProcessed -gt 0 -and $pass.durationSeconds -ge $minimum) 'Invalid RAM pass.'
     Assert ([math]::Abs($pass.gBps - $pass.bytesProcessed / $pass.durationSeconds / 1e9) -lt .0001) 'RAM accounting mismatch.'
 }
 Assert ($report.disk.status -eq 'Success') 'Disk stage failed.'
@@ -72,7 +82,11 @@ Assert ($report.disk.totalBytesWritten -le 1088MB) 'Write budget exceeded.'
 Assert ($report.disk.cleanupSucceeded) 'Reported cleanup failure.'
 foreach ($measurement in $report.disk.measurements) {
     Assert ($measurement.shortBurst -eq ($measurement.durationSeconds -lt 1)) 'Short-burst classification mismatch.'
-    if ($measurement.operation -eq 'SequentialRead') { Assert ($measurement.durationSeconds -ge 6 -or $measurement.stopReason -eq 'SampleCap') 'Sequential read observation too short.' }
+    if ($measurement.operation -eq 'SequentialRead') {
+        Assert ($measurement.durationSeconds -ge 6 -or $measurement.stopReason -eq 'SampleCap') 'Sequential read observation too short.'
+        Assert ($null -ne $measurement.filePasses) 'Missing sequential read pass count.'
+        if ($measurement.filePasses -ge 1) { Assert ($measurement.firstPassMBps -gt 0) 'Missing first-pass sequential read rate.' }
+    }
     Assert ($measurement.verified) 'Disk output not verified.'
     Assert ($measurement.bytesProcessed -eq $measurement.operations * $measurement.blockBytes) 'Disk byte accounting mismatch.'
     Assert ([math]::Abs($measurement.mBps - $measurement.bytesProcessed / $measurement.durationSeconds / 1e6) -lt .0001) 'Disk throughput mismatch.'
@@ -118,6 +132,8 @@ $partial = Get-Content -Raw (Join-Path $testRoot 'invalid-target\Latest.json') |
 Assert ($partial.status -eq 'Partial' -and $partial.cpu.outputVerified -and $partial.memory.status -eq 'Success') 'Disk failure erased earlier results.'
 Assert ($partial.disk.status -eq 'Failed') 'Invalid target was not reported.'
 Check-Cleanup
-Write-Host "PASS: full analysis ($([math]::Round($report.durationSeconds, 1))s), RAM accounting, disk accounting/write caps, graceful cancellation, forced-exit cleanup, existing-file safety, invalid target. Results: $testRoot"
+$duration = [math]::Round($report.durationSeconds, 1)
+if ($Keep) { Write-Host "Results kept: $testRoot" } else { Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue }
+Write-Host "PASS: full analysis (${duration}s), RAM accounting, disk accounting/write caps, graceful cancellation, forced-exit cleanup, existing-file safety, invalid target."
 
 

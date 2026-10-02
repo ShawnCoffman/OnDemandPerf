@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.InteropServices;
@@ -6,25 +7,35 @@ namespace OnDemandPerf.Core;
 
 public static class MemoryBenchmark
 {
+    internal const int BudgetSeconds = 21;
+    internal const int PassMilliseconds = 900;
+    internal const int PassesPerOperation = 3;
+    internal const int MultiPassMilliseconds = 400;
+    internal const int MaxMultiWorkers = 8;
+    internal const int MaxBufferBytes = 256 * 1024 * 1024;
+    internal const int MinBufferBytes = 32 * 1024 * 1024;
+    public static string Profile { get; } = ProfileHash.Compute("memory-v3", MaxBufferBytes, MinBufferBytes, PassMilliseconds,
+        PassesPerOperation, MultiPassMilliseconds, MaxMultiWorkers, MemoryLatencyBenchmark.Profile);
+
     public static MemoryResult Run(CancellationToken token, Action<string> progress)
     {
         var result = new MemoryResult();
         var timer = Stopwatch.StartNew();
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(token);
-        budget.CancelAfter(TimeSpan.FromSeconds(18));
+        budget.CancelAfter(TimeSpan.FromSeconds(BudgetSeconds));
         try
         {
             var status = new WindowsNative.MemoryStatus { Length = (uint)Marshal.SizeOf<WindowsNative.MemoryStatus>() };
             if (!WindowsNative.GlobalMemoryStatusEx(ref status)) throw new InvalidOperationException("Available RAM unavailable.");
             // Two buffers together use at most one eighth of currently available RAM, capped at 512 MiB.
-            int size = 256 * 1024 * 1024;
-            while ((ulong)size * 16 > status.AvailablePhysical && size >= 32 * 1024 * 1024) size /= 2;
-            if (size < 32 * 1024 * 1024) { result.Status = "Skipped"; result.Notes.Add("Insufficient available RAM for a low-pressure test."); return result; }
+            int size = MaxBufferBytes;
+            while ((ulong)size * 16 > status.AvailablePhysical && size >= MinBufferBytes) size /= 2;
+            if (size < MinBufferBytes) { result.Status = "Skipped"; result.Notes.Add("Insufficient available RAM for a low-pressure test."); return result; }
             byte[] source, destination;
             while (true)
             {
                 try { source = new byte[size]; destination = new byte[size]; break; }
-                catch (OutOfMemoryException) when (size > 32 * 1024 * 1024) { size /= 2; }
+                catch (OutOfMemoryException) when (size > MinBufferBytes) { size /= 2; }
             }
             result.BufferBytes = size;
             result.Notes.Add("Compare matching buffer sizes; reduced buffers and large CPU caches can influence throughput.");
@@ -32,14 +43,14 @@ public static class MemoryBenchmark
             destination.AsSpan().Fill(0x5A); // Commit pages outside measurement.
             foreach (string operation in new[] { "Copy", "Read", "Write" })
             {
-                progress($"RAM {operation.ToLowerInvariant()}: warmup and three passes...");
+                progress($"RAM {operation.ToLowerInvariant()}: warmup and {PassesPerOperation} passes...");
                 Perform(operation, source, destination, budget.Token);
-                for (int pass = 1; pass <= 3; pass++)
+                for (int pass = 1; pass <= PassesPerOperation; pass++)
                 {
                     long bytes = 0;
                     var watch = Stopwatch.StartNew();
                     do { Perform(operation, source, destination, budget.Token); bytes += size; }
-                    while (watch.ElapsedMilliseconds < 900);
+                    while (watch.ElapsedMilliseconds < PassMilliseconds);
                     watch.Stop();
                     budget.Token.ThrowIfCancellationRequested();
                     bool verified = operation == "Read" || (operation == "Write"
@@ -49,17 +60,31 @@ public static class MemoryBenchmark
                         bytes / watch.Elapsed.TotalSeconds / 1_000_000_000d, true));
                 }
             }
-            double Rate(string operation) => result.Passes.Where(p => p.Operation == operation).Sum(p => p.BytesProcessed)
-                / result.Passes.Where(p => p.Operation == operation).Sum(p => p.DurationSeconds) / 1_000_000_000d;
-            result.CopyGBps = Rate("Copy"); result.ReadGBps = Rate("Read"); result.WriteGBps = Rate("Write");
-            foreach (var operation in new[] { "Copy", "Read", "Write" })
+            RecordRates(result, ["Copy", "Read", "Write"]);
+            result.CopyGBps = Rate(result, "Copy"); result.ReadGBps = Rate(result, "Read"); result.WriteGBps = Rate(result, "Write");
+
+            // Single-threaded loops cannot saturate the memory system, so they are blind to channel-count problems.
+            // A bounded multi-worker read/copy pass gives a number that responds to dual vs single channel.
+            int workers = Math.Min(Environment.ProcessorCount, MaxMultiWorkers);
+            if (workers >= 2)
             {
-                var rates = result.Passes.Where(p => p.Operation == operation).Select(p => p.GBps).ToArray();
-                double mean = rates.Average();
-                double variation = Math.Sqrt(rates.Average(r => Math.Pow(r - mean, 2))) / mean * 100;
-                result.VariationPercent[operation] = variation;
-                if (variation > 5) result.Notes.Add($"{operation}: pass variation {variation:F1}% exceeded the provisional 5% noise threshold.");
+                result.MultiThreadWorkers = workers;
+                foreach (string operation in new[] { "Read", "Copy" })
+                {
+                    progress($"RAM multithread {operation.ToLowerInvariant()}: {workers} workers, {PassesPerOperation} passes...");
+                    string name = operation + "MT";
+                    for (int pass = 1; pass <= PassesPerOperation; pass++)
+                    {
+                        var (bytes, seconds) = MeasureParallel(operation, source, destination, workers, MultiPassMilliseconds, budget.Token);
+                        result.Passes.Add(new(name, pass, bytes, seconds, bytes / seconds / 1_000_000_000d, true));
+                    }
+                }
+                RecordRates(result, ["ReadMT", "CopyMT"]);
+                result.MultiThreadReadGBps = Rate(result, "ReadMT");
+                result.MultiThreadCopyGBps = Rate(result, "CopyMT");
             }
+            else result.Notes.Add("Multithread bandwidth skipped: fewer than two logical processors.");
+
             result.Latency = new MemoryLatencyResult { WorkingSetBytes = size };
             MemoryLatencyBenchmark.Run(source, result.Latency, budget.Token, progress);
         }
@@ -69,14 +94,34 @@ public static class MemoryBenchmark
         return result;
     }
 
+    private static double Rate(MemoryResult result, string operation)
+    {
+        var passes = result.Passes.Where(p => p.Operation == operation).ToArray();
+        return passes.Sum(p => p.BytesProcessed) / passes.Sum(p => p.DurationSeconds) / 1_000_000_000d;
+    }
+
+    private static void RecordRates(MemoryResult result, string[] operations)
+    {
+        foreach (var operation in operations)
+        {
+            var rates = result.Passes.Where(p => p.Operation == operation).Select(p => p.GBps).ToArray();
+            double variation = Stats.VariationPercent(rates);
+            result.VariationPercent[operation] = variation;
+            if (variation > 5) result.Notes.Add($"{operation}: pass variation {variation:F1}% exceeded the provisional 5% noise threshold.");
+        }
+    }
+
     private static void Perform(string operation, byte[] source, byte[] destination, CancellationToken token)
+        => Perform(operation, source.AsSpan(), destination.AsSpan(), token);
+
+    private static void Perform(string operation, ReadOnlySpan<byte> source, Span<byte> destination, CancellationToken token)
     {
         const int chunk = 1024 * 1024;
         for (int offset = 0; offset < source.Length; offset += chunk)
         {
             token.ThrowIfCancellationRequested();
-            var input = source.AsSpan(offset, Math.Min(chunk, source.Length - offset));
-            var output = destination.AsSpan(offset, input.Length);
+            var input = source.Slice(offset, Math.Min(chunk, source.Length - offset));
+            var output = destination.Slice(offset, input.Length);
             if (operation == "Copy") input.CopyTo(output);
             else if (operation == "Write") output.Fill(0xA5);
             else
@@ -89,5 +134,69 @@ public static class MemoryBenchmark
             }
         }
     }
-}
 
+    /// <summary>
+    /// Runs one timed pass with several dedicated workers, each streaming its own 4 KiB-aligned slice of the shared buffers.
+    /// Workers warm up on their slice, rendezvous, then run until a common deadline. Copy output is verified after timing.
+    /// </summary>
+    private static (long Bytes, double Seconds) MeasureParallel(string operation, byte[] source, byte[] destination,
+        int workers, int milliseconds, CancellationToken token)
+    {
+        int slice = source.Length / workers / 4096 * 4096;
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(token);
+        using var ready = new CountdownEvent(workers);
+        using var gate = new ManualResetEventSlim(false);
+        var failures = new ConcurrentQueue<Exception>();
+        var bytes = new long[workers];
+        var ends = new long[workers];
+        var threads = new List<Thread>();
+        long start = 0;
+        try
+        {
+            for (int worker = 0; worker < workers; worker++)
+            {
+                int index = worker;
+                var thread = new Thread(() =>
+                {
+                    bool signalled = false;
+                    try
+                    {
+                        var input = source.AsSpan(index * slice, slice);
+                        var output = destination.AsSpan(index * slice, slice);
+                        Perform(operation, input, output, stop.Token); // untimed warmup over this worker's slice
+                        ready.Signal(); signalled = true;
+                        gate.Wait(stop.Token);
+                        long local = 0;
+                        while (Stopwatch.GetElapsedTime(start).TotalMilliseconds < milliseconds)
+                        {
+                            Perform(operation, input, output, stop.Token);
+                            local += slice;
+                        }
+                        bytes[index] = local;
+                        ends[index] = Stopwatch.GetTimestamp();
+                    }
+                    catch (Exception ex) { failures.Enqueue(ex); stop.Cancel(); }
+                    finally { if (!signalled) ready.Signal(); }
+                }) { IsBackground = true, Name = $"OnDemandPerf RAM {index}" };
+                thread.Start();
+                threads.Add(thread);
+            }
+            ready.Wait(stop.Token);
+            start = Stopwatch.GetTimestamp();
+            gate.Set();
+        }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+        finally
+        {
+            if (start == 0) stop.Cancel();
+            gate.Set();
+            foreach (var thread in threads) thread.Join();
+        }
+        token.ThrowIfCancellationRequested();
+        if (!failures.IsEmpty) throw new InvalidOperationException("RAM worker failed.", failures.First());
+        if (bytes.Any(b => b == 0)) throw new InvalidOperationException("Not every RAM worker completed timed work.");
+        if (operation == "Copy" && !destination.AsSpan(0, slice * workers).SequenceEqual(source.AsSpan(0, slice * workers)))
+            throw new InvalidDataException("RAM multithread copy verification failed.");
+        return (bytes.Sum(), Stopwatch.GetElapsedTime(start, ends.Max()).TotalSeconds);
+    }
+}

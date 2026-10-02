@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Text.Json;
 using OnDemandPerf.Core;
 
 namespace OnDemandPerf;
@@ -10,7 +9,7 @@ internal sealed class TestWindow : Form
     private readonly Button cancel = new PerfButton { Text = "Cancel", Width = 80, Enabled = false };
     private readonly Button results = new PerfButton { Text = "Open Results", Width = 140 };
     private readonly Label status = new() { Text = "Ready to test", Dock = DockStyle.Fill, AutoEllipsis = true };
-    private readonly Label elapsed = new() { Text = "CPU, RAM and disk · usually 45–55 seconds", Dock = DockStyle.Fill };
+    private readonly Label elapsed = new() { Text = "CPU, RAM and disk · about 50 seconds", Dock = DockStyle.Fill };
     private readonly SegmentedActivity progress = new() { Dock = DockStyle.Fill };
     private readonly TextBox output = new()
     {
@@ -27,10 +26,13 @@ internal sealed class TestWindow : Form
     private Process? worker;
     private Task? runningTask;
     private bool cancelling;
+    private string? reportPath;
 
     internal bool IsRunning { get; private set; }
     internal string StatusText => status.Text;
     internal event EventHandler? StateChanged;
+    /// <summary>Raised when a run produced a report; the argument is a one-line summary suitable for a tray notification.</summary>
+    internal event EventHandler<string>? RunCompleted;
 
     public TestWindow()
     {
@@ -123,6 +125,7 @@ internal sealed class TestWindow : Form
     {
         IsRunning = true;
         cancelling = false;
+        reportPath = null;
         run.Enabled = results.Enabled = false;
         cancel.Enabled = true;
         output.Clear();
@@ -131,14 +134,14 @@ internal sealed class TestWindow : Form
         timer.Start();
         progress.Style = ProgressBarStyle.Marquee;
         SetStatus("Starting performance test…");
-        var started = DateTimeOffset.Now;
         Task readers = Task.CompletedTask;
         try
         {
             var start = new ProcessStartInfo(Path.Combine(AppContext.BaseDirectory, "worker", "OnDemandPerf.Worker.exe"))
             {
                 UseShellExecute = false, CreateNoWindow = true,
-                RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true
+                RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true,
+                StandardOutputEncoding = new System.Text.UTF8Encoding(false), StandardErrorEncoding = new System.Text.UTF8Encoding(false)
             };
             start.ArgumentList.Add("/run");
             worker = Process.Start(start) ?? throw new InvalidOperationException("Unable to start worker.");
@@ -156,11 +159,9 @@ internal sealed class TestWindow : Form
             await readers;
             if (!timedOut && current.ExitCode is 0 or 1)
             {
-                var json = await File.ReadAllTextAsync(Path.Combine(ResultStore.DefaultDirectory, "Latest.json"));
-                using var report = JsonDocument.Parse(json);
-                if (report.RootElement.GetProperty("timestamp").GetDateTimeOffset() < started)
-                    throw new InvalidOperationException("No report was saved for this test.");
-                ShowResult(report.RootElement);
+                // The worker names the exact file it wrote; never guess from Latest.json and timestamps.
+                var path = reportPath ?? throw new InvalidOperationException("No report was saved for this test.");
+                ShowResult(ResultStore.Load(path));
                 results.Enabled = File.Exists(Path.Combine(ResultStore.DefaultDirectory, "Latest.txt"));
             }
             else
@@ -195,99 +196,43 @@ internal sealed class TestWindow : Form
         }
     }
 
-    private void ShowResult(JsonElement report)
+    private void ShowResult(AnalysisResult report)
     {
         activeCard = null;
-        SetCardResult(cpuCard, report.GetProperty("cpu"), "multiThread", "mBps", "Multi · MB/s");
-        SetCardResult(ramCard, report.GetProperty("memory"), null, "copyGBps", "Copy · GB/s");
-        var diskResult = report.GetProperty("disk");
-        JsonElement? sequentialRead = diskResult.ValueKind == JsonValueKind.Object
-            ? diskResult.GetProperty("measurements").EnumerateArray().FirstOrDefault(m => m.GetProperty("operation").GetString() == "SequentialRead") : null;
-        SetCardResult(diskCard, diskResult, null, null, "Seq read · MB/s", sequentialRead);
-        var outcome = report.GetProperty("status").GetString();
-        var warnings = report.GetProperty("warnings").GetArrayLength();
-        SetStatus(outcome switch
-        {
-            "Success" => warnings > 0 ? "Test complete — review warnings" : "Test complete",
-            "Cancelled" => "Test cancelled",
-            "Partial" => "Test complete — review incomplete tests",
-            _ => "Test failed"
-        });
-        var lines = new List<string>();
-        if (report.GetProperty("cpu") is { ValueKind: JsonValueKind.Object } cpu)
-        {
-            foreach (var (key, label) in new[] { ("singleThread", "CPU single-thread"), ("multiThread", "CPU multithread") })
-                if (cpu.GetProperty(key) is { ValueKind: JsonValueKind.Object } measurement)
-                    lines.Add($"{label}: {measurement.GetProperty("mBps").GetDouble():F1} MB/s");
-        }
-        if (report.GetProperty("memory") is { ValueKind: JsonValueKind.Object } memory)
-        {
-            string Rate(string key) => memory.GetProperty(key) is { ValueKind: JsonValueKind.Number } value
-                ? $"{value.GetDouble():F1}" : "—";
-            lines.Add($"RAM: copy/read/write {Rate("copyGBps")} / {Rate("readGBps")} / {Rate("writeGBps")} GB/s");
-            if (memory.TryGetProperty("latency", out var latency) && latency.ValueKind == JsonValueKind.Object &&
-                latency.TryGetProperty("nanosecondsPerAccess", out var ns) && ns.ValueKind == JsonValueKind.Number)
-                lines.Add($"RAM dependent-access latency: {ns.GetDouble():F1} ns");
-            if (memory.GetProperty("status").GetString() != "Success") lines.Add("RAM: " + memory.GetProperty("status").GetString());
-        }
-        if (report.GetProperty("disk") is { ValueKind: JsonValueKind.Object } disk)
-        {
-            if (disk.GetProperty("status").GetString() != "Success") lines.Add("Disk: " + disk.GetProperty("status").GetString());
-            foreach (var measurement in disk.GetProperty("measurements").EnumerateArray().OrderBy(m => m.GetProperty("operation").GetString() switch { "RandomRead" => 0, "SequentialRead" => 1, _ => 2 }))
-            {
-                var operation = measurement.GetProperty("operation").GetString() switch
-                {
-                    "SequentialWrite" => "sequential write", "SequentialRead" => "sequential read",
-                    "RandomRead" => "random read", "RandomWrite" => "random write", _ => "measurement"
-                };
-                var measurementStatus = measurement.GetProperty("status").GetString();
-                var note = measurementStatus == "Success" ? "" : $" ({measurementStatus})";
-                if (measurement.TryGetProperty("shortBurst", out var burst) && burst.GetBoolean()) note += " · short burst";
-                if (measurement.GetProperty("operation").GetString() == "RandomRead")
-                    lines.Add($"Disk random read: {measurement.GetProperty("iops").GetDouble():N0} IOPS · p95 {measurement.GetProperty("p95LatencyMs").GetDouble():F3} ms{note}");
-                if (measurement.GetProperty("operation").GetString() == "RandomRead") continue;
-                lines.Add($"Disk: {operation} {measurement.GetProperty("mBps").GetDouble():F1} MB/s{note}");
-            }
-        }
-        foreach (var error in report.GetProperty("errors").EnumerateArray()) lines.Add("Error: " + error.GetString());
-        if (warnings > 0) lines.Add($"{warnings} warning(s). Open Results for details.");
-        lines.Add("\r\nOpen Results for the full report, measurement notes and test conditions.");
+        var cpu = ResultSummary.CpuCard(report);
+        var ram = ResultSummary.RamCard(report);
+        var disk = ResultSummary.DiskCard(report);
+        foreach (var (card, value) in new[] { (cpuCard, cpu), (ramCard, ram), (diskCard, disk) })
+            card.UpdateState(value.State, value.Value, value.Caption);
+        var headline = ResultSummary.Headline(report);
+        SetStatus(headline);
         var activity = output.Text;
-        output.Text = string.Join(Environment.NewLine, lines) + "\r\n\r\nActivity\r\n" + activity;
+        output.Text = string.Join(Environment.NewLine, ResultSummary.Lines(report)) + "\r\n\r\nActivity\r\n" + activity;
         output.SelectionStart = 0;
         output.SelectionLength = 0;
         output.ScrollToCaret();
+        RunCompleted?.Invoke(this, $"{headline}. CPU {cpu.Value} MB/s · RAM {ram.Value} GB/s · Disk {disk.Value} MB/s");
     }
 
     private async Task ReadAsync(StreamReader reader)
     {
         while (await reader.ReadLineAsync() is { } line)
         {
+            // "##" lines are the worker's structured protocol; everything else is human-readable activity.
+            if (line.StartsWith("##stage ", StringComparison.Ordinal)) { if (!cancelling) ActivateStage(line[8..]); continue; }
+            if (line.StartsWith("##report ", StringComparison.Ordinal)) { reportPath = line[9..]; continue; }
             Append(line);
-            if (!cancelling)
-            {
-                StageCard? next = line.StartsWith("Single-thread") || line.StartsWith("Multithread") ? cpuCard
-                    : line.StartsWith("RAM ") ? ramCard : line.StartsWith("Disk ") ? diskCard : null;
-                if (next is not null && next != activeCard)
-                {
-                    activeCard?.UpdateState("waiting", "—", "Awaiting result");
-                    activeCard = next;
-                    activeCard.UpdateState("running", "Testing", "In progress");
-                }
-                SetStatus(line);
-            }
+            if (!cancelling) SetStatus(line);
         }
     }
 
-    private static void SetCardResult(StageCard card, JsonElement stage, string? nested, string? metric, string caption, JsonElement? measurement = null)
+    private void ActivateStage(string stage)
     {
-        if (stage.ValueKind != JsonValueKind.Object) { card.UpdateState("waiting", "—", "Not completed"); return; }
-        string state = stage.GetProperty("status").GetString() ?? "Incomplete";
-        JsonElement value = measurement ?? (nested is null ? stage : stage.GetProperty(nested));
-        bool valid = value.ValueKind == JsonValueKind.Object && value.TryGetProperty(metric ?? "mBps", out var rate) && rate.ValueKind == JsonValueKind.Number;
-        if (state == "Success" && valid)
-            card.UpdateState("success", value.GetProperty(metric ?? "mBps").GetDouble().ToString("N1"), caption);
-        else card.UpdateState("partial", "—", state == "Success" ? "Not completed" : state);
+        StageCard? next = stage switch { "CPU" => cpuCard, "RAM" => ramCard, "Disk" => diskCard, _ => null };
+        if (next is null || next == activeCard) return;
+        activeCard?.UpdateState("waiting", "—", "Awaiting result");
+        activeCard = next;
+        activeCard.UpdateState("running", "Testing", "In progress");
     }
 
     protected override void OnPaint(PaintEventArgs e)

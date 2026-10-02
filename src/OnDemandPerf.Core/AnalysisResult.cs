@@ -2,8 +2,8 @@ namespace OnDemandPerf.Core;
 
 public sealed class AnalysisResult
 {
-    public string SchemaVersion { get; init; } = "1.4";
-    public string ApplicationVersion { get; init; } = "0.5.0";
+    public string SchemaVersion { get; init; } = "2.0";
+    public string ApplicationVersion { get; init; } = AppInfo.Version;
     public string RunId { get; init; } = Guid.NewGuid().ToString("N");
     public DateTimeOffset Timestamp { get; init; } = DateTimeOffset.Now;
     public double DurationSeconds { get; set; }
@@ -36,6 +36,8 @@ public sealed class TestEnvironment
     public ulong? UsedPhysicalBytes { get; set; }
     public double? RamUtilizationPercent { get; set; }
     public string PowerSource { get; set; } = "Unavailable";
+    /// <summary>Whether the worker opted out of Windows efficiency mode (EcoQoS): "OptedOut", "Failed: ..." or "NotAttempted".</summary>
+    public string ProcessPowerThrottling { get; set; } = "NotAttempted";
     public bool? BatteryPresent { get; set; }
     public int? BatteryChargePercent { get; set; }
     public string? PowerPlan { get; set; }
@@ -49,20 +51,21 @@ public sealed class TestEnvironment
 public sealed class CpuResult
 {
     public string BenchmarkVersion { get; init; } = "deflate-v3";
+    /// <summary>Fingerprint of durations, pass counts and sizes. Compare only runs with the same version and fingerprint.</summary>
+    public string ProfileHash { get; init; } = CpuBenchmark.Profile;
     public string Status { get; set; } = "Success";
     public string Algorithm { get; init; } = "Deflate";
     public string CompressionLevel { get; init; } = "Optimal";
-    public string Dataset { get; init; } = "xorshift32-seed-12345678-repeated-64KiB-v1";
-    public int InputBytesPerOperation { get; init; } = 1024 * 1024;
+    public string Dataset { get; init; } = CpuBenchmark.DatasetId;
+    public int InputBytesPerOperation { get; init; } = CpuBenchmark.InputBytes;
     public int WorkerCount { get; init; }
-    public int RequestedMillisecondsPerPass { get; init; } = 3000;
     public string ThroughputUnit { get; init; } = "MB/s (1 MB = 1,000,000 bytes)";
-    public double CompressionMBps { get; set; }
-    public List<CpuPass> Passes { get; init; } = [];
+    public string VariationMethod { get; init; } = Stats.VariationMethod;
     public CpuMeasurement? SingleThread { get; set; }
     public CpuMeasurement? MultiThread { get; set; }
     public double DurationSeconds { get; set; }
-    public int WarmupMillisecondsPerPass { get; init; } = 250;
+    public int WarmupMillisecondsPerPass { get; init; } = CpuBenchmark.WarmupMilliseconds;
+    /// <summary>True only when both stages completed and every worker's final output round-tripped.</summary>
     public bool OutputVerified { get; set; }
     public List<string> QualityNotes { get; init; } = [];
 }
@@ -71,10 +74,13 @@ public sealed class CpuMeasurement
 {
     public int RequestedWorkers { get; init; }
     public int RequestedMillisecondsPerPass { get; init; }
+    /// <summary>Aggregate: total bytes / total measured time. This is the headline score.</summary>
     public double MBps { get; set; }
+    /// <summary>Median of the per-pass rates; less sensitive to one disturbed pass than the aggregate.</summary>
+    public double MedianMBps { get; set; }
     public double VariationPercent { get; set; }
     public double FirstToLastChangePercent { get; set; }
-    public List<CpuPass> Passes { get; } = [];
+    public List<CpuPass> Passes { get; init; } = [];
 }
 
 public sealed record CpuPass(int Pass, long BytesProcessed, double DurationSeconds, double MBps)
