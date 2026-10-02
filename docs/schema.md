@@ -20,6 +20,7 @@ A stage that did not run is `null`. A successful run can carry warnings.
 - `memory`: `copyGBps`, `readGBps`, `writeGBps` (single worker), `multiThreadWorkers`, `multiThreadReadGBps`,
   `multiThreadCopyGBps`, `passes[]` (operations `Copy`, `Read`, `Write`, `ReadMT`, `CopyMT`), `variationPercent` per operation,
   `latency` (`nanosecondsPerAccess`, `cycleVerified`, passes).
+- `environment.processPowerThrottling`: whether the worker opted out of Windows efficiency mode (`OptedOut`, `Failed: ...`).
 - `disk.measurements[]`: `SequentialWrite`, `SequentialRead`, `RandomWrite`, `RandomRead`, each with operations, bytes, duration,
   `mBps`, `iops`, mean and p95 latency, `shortBurst`, `stopReason`. `SequentialRead` also has `filePasses` and `firstPassMBps`.
 
@@ -34,3 +35,4 @@ A stage that did not run is `null`. A successful run can carry warnings.
   `filePasses` / `firstPassMBps` to the sequential read.
 - `cpu.status` may be `TimedOut` with a null stage instead of the run failing outright.
 - `applicationVersion` is read from the assembly rather than hard-coded.
+- Added `environment.processPowerThrottling`.
