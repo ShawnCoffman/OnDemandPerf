@@ -1,0 +1,1229 @@
+# Accepted Architecture — Current Prototype
+
+Version 0.4.0 implements /run, /memory, and /disk, with Quick Analysis in the tray/window. RAM uses bounded managed buffers and verified copy/read/write passes. Disk uses aligned direct I/O, queue depth 1, latency metrics, a 528 MiB write-payload cap, and delete-on-close cleanup. CPU/RAM/disk stage limits are 18/11/22 seconds; work cancellation at 55 seconds reserves cleanup/report time before the tray termination deadline at 60 seconds. Runs may finish sooner when byte caps are reached. README.md documents implemented methodology and limitations; the detailed original plan below remains broader future scope.
+
+OnDemand Perf starts at user sign-in and waits in the system tray. Startup must not collect inventory or run benchmarks. A user explicitly starts work from the tray or window; enterprise management can invoke the worker directly.
+
+- C# / .NET 10 LTS, Windows Forms tray interface, unsafe code disabled.
+- Version 0.3.0 uses deflate-v2: synchronized workers, single-thread and multithread passes, output verification, and variability reporting. CPU targets 12–15 seconds with an 18-second cooperative safety deadline. The eventual complete inventory/CPU/RAM/disk run targets 45 seconds and a 60-second overall deadline; this supersedes the older 30–90 second guidance below.
+- Separate tray, worker executable, and shared core projects.
+- First implementation: basic CPU/system inventory and a deterministic CPU compression test, JSON/text output, cancellation, deadlines, and overlap prevention.
+- Version 0.2.0 adds friendly Windows product/edition/release/build, physical cores, system logical processors, OS-usable RAM, power source/plan, and a one-second pre-test CPU activity sample. Optional collection failures become warnings. BIOS/storage/DIMM inventory remains future work.
+- Default prototype output is per-user `%LOCALAPPDATA%\OnDemandPerf\`; `/output` overrides it for managed worker execution. Machine-wide output policy remains a deployment decision.
+- Keep 50 historical report pairs; rotate the log at 2 MiB with one backup.
+- Prototype build uses the installed .NET 10 Desktop Runtime. Signed installer, runtime distribution, managed startup policy, and fleet rollout validation follow later.
+- A helper script can register user sign-in startup. Building does not alter this computer's startup settings.
+- Implement CPU first, then memory/storage, then expand inventory and deployment readiness. The older numbered phases below describe the broader scope, not the revised implementation order.
+
+---
+# OnDemand Perf — Project Build Plan
+
+## Project Goal
+
+Build a very small Windows application named **OnDemand Perf** that performs a fast hardware inventory and a handful of lightweight benchmark tests.
+
+The application is intended for enterprise hardware validation and troubleshooting.
+
+The focus is:
+
+- Very small footprint
+- Fast execution
+- Minimal dependencies
+- No internet requirement
+- No third-party benchmark suites
+- No installation requirement for the first version
+- Easy to run manually or remotely
+- Consistent and repeatable test results
+- JSON-first output for later ingestion into databases, Power BI, GCP, Tanium, Intune, or other tools
+
+This is not intended to compete with Cinebench, PCMark, CrystalDiskMark, PassMark, or other full benchmarking suites.
+
+The goal is a **quick hardware performance snapshot** that can normally finish in roughly 30–90 seconds.
+
+---
+
+# Target Platform
+
+Primary OS:
+
+- Windows 11
+- Windows 10 support is desirable if practical
+
+Architecture:
+
+- x64 required
+- ARM64 should be considered for future support
+
+Recommended implementation:
+
+- C#
+- .NET 10 LTS
+- Self-contained executable if practical
+- Native Windows APIs/WMI/CIM where useful
+
+Avoid unnecessary external dependencies.
+
+The first release should preferably run as:
+
+`OnDemandPerf.exe`
+
+without requiring an installer.
+
+---
+
+# Default Output Location
+
+All output must be stored under:
+
+`%LOCALAPPDATA%\OnDemandPerf\`
+
+Directory structure:
+
+```text
+%LOCALAPPDATA%\OnDemandPerf\
+│
+├── Latest.json
+├── Latest.txt
+├── OnDemandPerf.log
+│
+└── Results\
+    ├── 2026-09-24_191745.json
+    ├── 2026-09-24_191745.txt
+    └── ...
+```
+
+Every execution should:
+
+1. Create the directory if it does not exist.
+2. Generate a timestamped result.
+3. Write the latest result to `Latest.json`.
+4. Write a human-readable copy to `Latest.txt`.
+5. Store a timestamped historical copy under `Results`.
+6. Log execution details and errors to `OnDemandPerf.log`.
+
+The benchmark should never silently fail.
+
+---
+
+# Application Modes
+
+## GUI Mode
+
+Default behavior when double-clicked.
+
+The interface should be extremely simple.
+
+Example:
+
+```text
+OnDemand Perf
+──────────────────────────────────
+
+Device: Dell Latitude 7450
+CPU: Intel Core Ultra 7
+RAM: 32 GB
+Storage: 1 TB NVMe
+
+[ Run Quick Analysis ]
+
+System Inventory       Ready
+CPU Benchmark          Ready
+Memory Benchmark       Ready
+Storage Benchmark      Ready
+
+Results:
+%LOCALAPPDATA%\OnDemandPerf\
+```
+
+While running:
+
+```text
+System Inventory       Complete
+CPU Benchmark          Running...
+Memory Benchmark       Waiting
+Storage Benchmark      Waiting
+```
+
+Final result:
+
+```text
+CPU Compression       684 MB/s
+Memory Copy           42.6 GB/s
+Disk Read             5,124 MB/s
+Disk Write            4,378 MB/s
+
+Completed in 46.2 seconds
+
+[ Open Results Folder ]
+[ Run Again ]
+```
+
+Avoid charts, animations, dashboards, or unnecessary UI complexity in the initial release.
+
+---
+
+# Command-Line Mode
+
+The application should also support command-line operation.
+
+Examples:
+
+```text
+OnDemandPerf.exe /run
+```
+
+Run all standard tests.
+
+```text
+OnDemandPerf.exe /inventory
+```
+
+Collect hardware data only.
+
+```text
+OnDemandPerf.exe /cpu
+```
+
+Run CPU benchmark only.
+
+```text
+OnDemandPerf.exe /memory
+```
+
+Run memory benchmark only.
+
+```text
+OnDemandPerf.exe /disk
+```
+
+Run disk benchmark only.
+
+Future flags may include:
+
+```text
+/silent
+/output
+/quick
+/full
+```
+
+The architecture should allow those options later without requiring a redesign.
+
+---
+
+# System Inventory
+
+Collect the following information before benchmarking.
+
+## General System
+
+Collect:
+
+- Computer name
+- Manufacturer
+- System model
+- Serial number
+- UUID
+- Windows edition
+- Windows version
+- Windows build
+- OS architecture
+- System uptime
+- Last boot time
+
+---
+
+# BIOS Information
+
+Collect:
+
+- BIOS vendor
+- BIOS version
+- BIOS release date
+- SMBIOS version if available
+
+Example:
+
+```text
+Manufacturer: Dell Inc.
+Model: Latitude 7450
+BIOS: 1.15.0
+BIOS Date: 08/14/2026
+```
+
+---
+
+# CPU Information
+
+Collect:
+
+- CPU manufacturer
+- Full processor name
+- Processor architecture
+- CPU family/model where available
+- Physical core count
+- Logical processor count
+- Base/max clock if reliably available
+- Current architecture:
+  - x64
+  - ARM64
+  - other
+
+Example:
+
+```text
+CPU:
+Intel Core Ultra 7 165U
+
+Architecture: x64
+Physical Cores: 12
+Logical CPUs: 14
+```
+
+Do not rely on CPU name parsing for core counts.
+
+---
+
+# Memory Information
+
+Collect:
+
+- Total physical RAM
+- Available/free RAM
+- Used RAM
+- RAM utilization percentage
+
+If practical, also collect per-DIMM information:
+
+- DIMM manufacturer
+- Capacity
+- Configured speed
+- Part number
+- Number of installed modules
+
+Example:
+
+```text
+Total RAM: 32 GB
+Available RAM: 19.4 GB
+Used RAM: 12.6 GB
+Utilization: 39%
+```
+
+Do not fail the application if DIMM-specific data is unavailable.
+
+---
+
+# Storage Information
+
+Identify the primary Windows storage device.
+
+Collect:
+
+- Disk manufacturer
+- Model
+- Serial number if accessible
+- Media type
+- Bus type
+- NVMe/SATA/USB where detectable
+- Physical disk capacity
+- Windows volume capacity
+- Free volume space
+- Used space
+- File system
+
+Example:
+
+```text
+Disk:
+KXG80ZNV1T02 NVMe
+
+Bus: NVMe
+Capacity: 953.9 GB
+Free: 612.4 GB
+File System: NTFS
+```
+
+Prefer the Windows system disk as the default benchmark target.
+
+---
+
+# GPU Information
+
+Collect basic GPU data only.
+
+Include:
+
+- GPU name
+- Vendor
+- Driver version
+- Driver date if easily available
+
+No GPU benchmark is required for version 1.
+
+---
+
+# Network Information
+
+Collect lightweight network hardware information.
+
+Include:
+
+- Physical Ethernet adapter
+- Wi-Fi adapter
+- Adapter manufacturer
+- Adapter model
+- Driver version
+- Link speed where available
+
+Do not collect:
+
+- Wi-Fi SSID
+- Passwords
+- user network data
+- browsing data
+
+---
+
+# Battery Information
+
+If the system is a laptop and battery information is available, collect:
+
+- Designed capacity
+- Full charge capacity
+- Current charge
+- Battery health percentage
+
+Calculate:
+
+```text
+Battery Health % =
+Full Charge Capacity / Design Capacity * 100
+```
+
+Battery collection should be optional and must not cause failure on desktops.
+
+---
+
+# CPU Benchmark
+
+Create a quick and deterministic CPU workload.
+
+Preferred benchmark:
+
+## Compression Benchmark
+
+Generate or allocate a known in-memory dataset and repeatedly compress it.
+
+Possible algorithms:
+
+- Deflate
+- GZip
+- Brotli
+
+Use a fixed test dataset and workload for every machine.
+
+Measure:
+
+- Input data size
+- Total bytes processed
+- Benchmark duration
+- MB/s throughput
+
+Preferred output:
+
+```text
+CPU Compression: 684.2 MB/s
+```
+
+The benchmark should run long enough to provide a stable result but short enough to remain a quick test.
+
+Suggested duration:
+
+Approximately 5–10 seconds.
+
+Use all logical processors if practical.
+
+---
+
+# Optional CPU Secondary Test
+
+Consider adding a second low-cost CPU benchmark such as:
+
+- SHA-256 hashing
+- AES encryption
+- decompression
+
+Example:
+
+```text
+SHA256 Throughput: 3,482 MB/s
+```
+
+This may be added after the compression test is working reliably.
+
+Do not add generic synthetic scores.
+
+---
+
+# Memory Benchmark
+
+Create a lightweight memory bandwidth test.
+
+At minimum test:
+
+- Sequential memory write
+- Sequential memory read
+- Memory copy
+
+Use large memory buffers.
+
+Suggested allocation:
+
+256 MB to 1 GB depending on available RAM.
+
+Avoid allocating so much memory that the application causes system pressure.
+
+The application should dynamically reduce the test size on low-memory systems.
+
+Measure:
+
+```text
+Memory Read: XX.X GB/s
+Memory Write: XX.X GB/s
+Memory Copy: XX.X GB/s
+```
+
+Prefer the memory copy result as the primary comparison metric.
+
+The test should execute multiple passes and average the result to reduce noise.
+
+Example:
+
+```text
+Memory Copy: 42.6 GB/s
+```
+
+Avoid claiming this represents raw theoretical DDR bandwidth.
+
+It is an application-level memory throughput measurement.
+
+---
+
+# Storage Benchmark
+
+Create a temporary benchmark file under:
+
+`%LOCALAPPDATA%\OnDemandPerf\TestData\`
+
+Delete temporary benchmark files after testing.
+
+Do not benchmark using tiny cached files.
+
+Use a sufficiently large file to reduce filesystem cache distortion.
+
+Recommended initial size:
+
+512 MB
+
+Optionally:
+
+1 GB
+
+depending on available disk space.
+
+---
+
+# Sequential Disk Test
+
+Measure:
+
+- Sequential write throughput
+- Sequential read throughput
+
+Use large block sizes.
+
+Suggested block size:
+
+1 MB
+
+Results:
+
+```text
+Sequential Read: 5,124 MB/s
+Sequential Write: 4,378 MB/s
+```
+
+---
+
+# Random Disk Test
+
+Include a lightweight 4K random test if practical.
+
+Measure:
+
+- 4K random read
+- 4K random write
+
+Results may be represented as:
+
+```text
+Random Read: 392 MB/s
+Random Write: 318 MB/s
+```
+
+or optionally IOPS:
+
+```text
+4K Random Read: 100,352 IOPS
+```
+
+For version 1, prioritize repeatability over maximum benchmark sophistication.
+
+---
+
+# Disk Safety Requirements
+
+The storage test must:
+
+- Never benchmark the entire physical disk destructively
+- Never overwrite user files
+- Only use application-created temporary files
+- Check available free space before running
+- Delete the test file when completed
+- Attempt cleanup after failures
+- Avoid running huge write workloads
+
+The benchmark should intentionally remain lightweight to reduce SSD wear.
+
+---
+
+# Benchmark Repeatability
+
+Each benchmark should have:
+
+- Fixed workload
+- Fixed test sizes where practical
+- Fixed number of passes
+- Stable timing method
+- Clear units
+
+Use a high-resolution timer such as:
+
+`Stopwatch`
+
+Ignore extremely short warm-up passes.
+
+Consider performing:
+
+```text
+Warmup
+Pass 1
+Pass 2
+Pass 3
+Average
+```
+
+Store individual pass results in JSON even if the UI only shows the average.
+
+---
+
+# Environmental Data
+
+Capture basic system state at test time.
+
+Include:
+
+- CPU utilization before benchmark
+- RAM utilization before benchmark
+- Available RAM
+- Battery vs AC power
+- Power plan if accessible
+- Disk free space
+
+This helps explain abnormal benchmark results.
+
+Do not attempt to aggressively manipulate the system before testing.
+
+---
+
+# Results Format
+
+JSON is the authoritative result format.
+
+Suggested structure:
+
+```json
+{
+  "schemaVersion": "1.0",
+  "applicationVersion": "1.0.0",
+  "timestamp": "2026-09-24T19:17:45-05:00",
+  "durationSeconds": 46.2,
+
+  "device": {
+    "computerName": "TEST-LT-001",
+    "manufacturer": "Dell Inc.",
+    "model": "Latitude 7450",
+    "serialNumber": "ABC1234"
+  },
+
+  "operatingSystem": {
+    "name": "Windows 11 Enterprise",
+    "version": "24H2",
+    "build": "26100",
+    "architecture": "x64"
+  },
+
+  "bios": {
+    "vendor": "Dell Inc.",
+    "version": "1.15.0",
+    "releaseDate": "2026-08-14"
+  },
+
+  "cpu": {
+    "name": "Intel Core Ultra 7 165U",
+    "architecture": "x64",
+    "physicalCores": 12,
+    "logicalProcessors": 14
+  },
+
+  "memory": {
+    "totalGB": 32.0,
+    "availableGB": 19.4,
+    "usedGB": 12.6
+  },
+
+  "storage": {
+    "model": "KXG80ZNV1T02 NVMe",
+    "busType": "NVMe",
+    "capacityGB": 953.9,
+    "freeGB": 612.4
+  },
+
+  "benchmarks": {
+    "cpu": {
+      "compressionMBps": 684.2
+    },
+
+    "memory": {
+      "readGBps": 44.1,
+      "writeGBps": 38.7,
+      "copyGBps": 42.6
+    },
+
+    "disk": {
+      "sequentialReadMBps": 5124,
+      "sequentialWriteMBps": 4378,
+      "randomReadMBps": 392,
+      "randomWriteMBps": 318
+    }
+  }
+}
+```
+
+---
+
+# Human-Readable Output
+
+Also generate a text report.
+
+Example:
+
+```text
+ONDEMAND PERF
+================================================
+
+Date:
+09/24/2026 7:17 PM
+
+DEVICE
+------------------------------------------------
+Manufacturer: Dell Inc.
+Model: Latitude 7450
+Serial: ABC1234
+
+OPERATING SYSTEM
+------------------------------------------------
+Windows 11 Enterprise
+Build: 26100
+Architecture: x64
+
+CPU
+------------------------------------------------
+Intel Core Ultra 7 165U
+Physical Cores: 12
+Logical CPUs: 14
+
+MEMORY
+------------------------------------------------
+Total: 32.0 GB
+Available: 19.4 GB
+
+STORAGE
+------------------------------------------------
+KXG80ZNV1T02 NVMe
+Capacity: 953.9 GB
+Free: 612.4 GB
+
+BENCHMARKS
+------------------------------------------------
+CPU Compression:        684.2 MB/s
+
+Memory Read:             44.1 GB/s
+Memory Write:            38.7 GB/s
+Memory Copy:             42.6 GB/s
+
+Sequential Disk Read:    5124 MB/s
+Sequential Disk Write:   4378 MB/s
+Random Disk Read:         392 MB/s
+Random Disk Write:        318 MB/s
+
+------------------------------------------------
+Completed in 46.2 seconds
+```
+
+---
+
+# Logging
+
+Maintain:
+
+`%LOCALAPPDATA%\OnDemandPerf\OnDemandPerf.log`
+
+Log:
+
+- Application start
+- Application version
+- Benchmark start/stop
+- Test durations
+- Hardware detection failures
+- WMI/CIM failures
+- File access problems
+- Temporary file creation
+- Temporary file cleanup
+- Exceptions
+
+Example:
+
+```text
+2026-09-24 19:17:45 INFO Application started
+2026-09-24 19:17:45 INFO Inventory collection started
+2026-09-24 19:17:46 INFO CPU benchmark started
+2026-09-24 19:17:53 INFO CPU benchmark completed
+2026-09-24 19:18:02 INFO Memory benchmark completed
+2026-09-24 19:18:31 INFO Disk benchmark completed
+2026-09-24 19:18:31 INFO Results written successfully
+```
+
+---
+
+# Error Handling
+
+Failure of one component should not terminate the entire application.
+
+Example:
+
+If battery information fails:
+
+```text
+Battery:
+Unavailable
+```
+
+Continue running benchmarks.
+
+If random disk testing fails:
+
+```text
+Sequential Read: Complete
+Sequential Write: Complete
+Random Read: Failed
+Random Write: Failed
+```
+
+Still create the JSON output.
+
+Each test should contain a status such as:
+
+```text
+Success
+Failed
+Skipped
+Unsupported
+```
+
+Include errors in JSON.
+
+---
+
+# Privilege Requirements
+
+The application should run successfully as a normal Windows user whenever possible.
+
+Do not require administrative rights simply to perform:
+
+- CPU testing
+- RAM testing
+- storage testing
+- standard system inventory
+
+If certain hardware fields require elevation, mark them unavailable instead of forcing elevation.
+
+Administrator mode may be added later for advanced diagnostics.
+
+---
+
+# Performance Requirements
+
+Target application characteristics:
+
+Startup:
+
+Less than approximately 2 seconds on normal hardware.
+
+Total quick benchmark:
+
+Approximately 30–90 seconds.
+
+Application footprint:
+
+Keep as small as practical.
+
+Memory usage:
+
+Avoid excessive allocations outside the memory benchmark.
+
+CPU utilization:
+
+High utilization during CPU benchmark is expected.
+
+Disk usage:
+
+Temporary benchmark data only.
+
+---
+
+# Project Architecture
+
+Suggested structure:
+
+```text
+OnDemandPerf/
+│
+├── OnDemandPerf.sln
+│
+└── src/
+    └── OnDemandPerf/
+        │
+        ├── Program.cs
+        │
+        ├── UI/
+        │   └── MainWindow.cs
+        │
+        ├── Inventory/
+        │   ├── SystemInfoCollector.cs
+        │   ├── CpuInfoCollector.cs
+        │   ├── MemoryInfoCollector.cs
+        │   ├── StorageInfoCollector.cs
+        │   ├── BiosInfoCollector.cs
+        │   ├── GpuInfoCollector.cs
+        │   ├── NetworkInfoCollector.cs
+        │   └── BatteryInfoCollector.cs
+        │
+        ├── Benchmarks/
+        │   ├── CpuBenchmark.cs
+        │   ├── MemoryBenchmark.cs
+        │   └── DiskBenchmark.cs
+        │
+        ├── Models/
+        │   ├── AnalysisResult.cs
+        │   ├── DeviceInfo.cs
+        │   ├── CpuResult.cs
+        │   ├── MemoryResult.cs
+        │   └── DiskResult.cs
+        │
+        ├── Output/
+        │   ├── JsonWriter.cs
+        │   ├── TextReportWriter.cs
+        │   └── ResultManager.cs
+        │
+        └── Logging/
+            └── AppLogger.cs
+```
+
+Keep responsibilities separated.
+
+Do not place the entire application in one file.
+
+---
+
+# Development Priorities
+
+Build in this order.
+
+## Phase 1 — Core Framework
+
+Build:
+
+- application shell
+- output directory handling
+- logging
+- result model
+- JSON serialization
+
+Do not begin with UI polish.
+
+---
+
+## Phase 2 — Hardware Inventory
+
+Implement:
+
+- system
+- OS
+- BIOS
+- CPU
+- RAM
+- storage
+
+Validate inventory before implementing benchmarks.
+
+---
+
+## Phase 3 — CPU Benchmark
+
+Implement the deterministic compression test.
+
+Validate consistency across repeated executions.
+
+---
+
+## Phase 4 — Memory Benchmark
+
+Implement:
+
+- memory read
+- memory write
+- memory copy
+
+Add warmup and multiple passes.
+
+---
+
+## Phase 5 — Disk Benchmark
+
+Implement:
+
+- sequential read
+- sequential write
+
+Then add:
+
+- lightweight random read
+- lightweight random write
+
+Validate cleanup behavior thoroughly.
+
+---
+
+## Phase 6 — Reports
+
+Generate:
+
+- timestamped JSON
+- Latest.json
+- timestamped TXT
+- Latest.txt
+
+---
+
+## Phase 7 — GUI
+
+Create the simple GUI after backend functionality works.
+
+The GUI should call the same benchmark services used by command-line mode.
+
+Do not duplicate benchmark logic inside the UI.
+
+---
+
+## Phase 8 — Command-Line Support
+
+Add:
+
+```text
+/run
+/inventory
+/cpu
+/memory
+/disk
+/silent
+```
+
+Return useful process exit codes.
+
+Example:
+
+```text
+0 = Successful
+1 = Partial benchmark failure
+2 = Fatal application failure
+```
+
+---
+
+# Future Features
+
+Do not implement these in the initial version, but design the application so they can be added later.
+
+Potential future functionality:
+
+- GPU benchmark
+- Wi-Fi throughput testing
+- network latency testing
+- battery discharge testing
+- driver inventory
+- driver error detection
+- Windows reliability data
+- SMART/NVMe health
+- temperature monitoring
+- firmware inventory
+- USB device inventory
+- monitor inventory
+- performance history comparison
+- upload results to REST API
+- centralized dashboard
+- enterprise fleet baseline comparison
+- percentile calculations
+- model-level benchmark baselines
+- automatic outlier detection
+- benchmark regression detection after BIOS or driver changes
+
+---
+
+# Fleet Analytics Vision
+
+The local utility should produce data that could eventually support centralized analytics.
+
+Example future backend comparison:
+
+```text
+Device Model:
+Dell Latitude 7450
+
+Test Population:
+4,327 systems
+
+Median NVMe Read:
+5,080 MB/s
+
+Current System:
+1,842 MB/s
+
+Percentile:
+2nd percentile
+
+Potential performance issue detected.
+```
+
+Possible grouping fields:
+
+- manufacturer
+- model
+- CPU
+- memory configuration
+- SSD model
+- BIOS version
+- storage firmware
+- Windows build
+- driver version
+
+Do not build the centralized backend yet.
+
+Focus entirely on producing clean, consistent local telemetry.
+
+---
+
+# Benchmark Philosophy
+
+Do not generate arbitrary scores such as:
+
+```text
+Overall Score: 8742
+```
+
+Store real engineering measurements instead.
+
+Prefer:
+
+```text
+CPU Compression: 684 MB/s
+Memory Copy: 42.6 GB/s
+NVMe Sequential Read: 5124 MB/s
+NVMe Sequential Write: 4378 MB/s
+```
+
+This allows future comparisons without changing the meaning of historic results.
+
+If normalized scores are ever created later, calculate them in the analytics/backend layer rather than inside the endpoint application.
+
+---
+
+# Important Design Requirements
+
+Prioritize:
+
+1. Reliability
+2. Repeatability
+3. Small footprint
+4. Understandable measurements
+5. Clean JSON
+6. Safe disk testing
+7. Graceful error handling
+8. Easy enterprise deployment
+
+Avoid:
+
+- huge frameworks
+- unnecessary NuGet packages
+- cloud dependencies
+- telemetry sent outside the machine
+- destructive disk testing
+- overly complex dashboards
+- meaningless benchmark scores
+- administrator requirements unless necessary
+- unnecessary background services
+
+---
+
+# Definition of Done for Version 1
+
+Version 1 is complete when a user can launch:
+
+`OnDemandPerf.exe`
+
+click:
+
+`Run Quick Analysis`
+
+and receive:
+
+- system information
+- CPU information
+- memory information
+- disk information
+- CPU compression benchmark
+- memory bandwidth benchmark
+- sequential NVMe/storage benchmark
+- lightweight random storage benchmark
+- JSON output
+- text output
+- historical results
+- Latest.json
+- application log
+
+All results must be saved under:
+
+`%LOCALAPPDATA%\OnDemandPerf\`
+
+The application should run without internet access and without requiring third-party benchmark applications.

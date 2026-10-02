@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>WinExe</OutputType><UseWindowsForms>true</UseWindowsForms><ApplicationIcon>Assets/OnDemandPerf.ico</ApplicationIcon></PropertyGroup>
+  <ItemGroup><EmbeddedResource Include="Assets/OnDemandPerf.ico" /></ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../OnDemandPerf.Core/OnDemandPerf.Core.csproj" />
+    <ProjectReference Include="../OnDemandPerf.Worker/OnDemandPerf.Worker.csproj" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+  <Target Name="CopyWorker" AfterTargets="Build">
+    <ItemGroup><WorkerFiles Include="../OnDemandPerf.Worker/bin/$(Configuration)/$(TargetFramework)/*" /></ItemGroup>
+    <Copy SourceFiles="@(WorkerFiles)" DestinationFolder="$(OutDir)worker" />
+  </Target>
+</Project>
