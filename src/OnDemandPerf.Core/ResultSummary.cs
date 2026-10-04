@@ -47,6 +47,16 @@ public static class ResultSummary
         return new("partial", "—", disk.Status == "Success" ? "Not completed" : disk.Status);
     }
 
+    /// <summary>One line for a tray notification: the headline plus the card values that completed.</summary>
+    public static string Notification(AnalysisResult result)
+    {
+        var scores = new[] { ("CPU", CpuCard(result), "MB/s"), ("RAM", RamCard(result), "GB/s"), ("Disk", DiskCard(result), "MB/s") }
+            .Where(s => s.Item2.State == "success")
+            .Select(s => $"{s.Item1} {s.Item2.Value} {s.Item3}")
+            .ToList();
+        return scores.Count == 0 ? Headline(result) : $"{Headline(result)}. {string.Join(" · ", scores)}";
+    }
+
     private static string Number(double? value) => value is { } v ? v.ToString("F1", CultureInfo.CurrentCulture) : "—";
 
     public static IReadOnlyList<string> Lines(AnalysisResult result)

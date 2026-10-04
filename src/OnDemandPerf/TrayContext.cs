@@ -16,7 +16,7 @@ internal sealed class TrayContext : ApplicationContext
         _ = marshal.Handle; // force handle creation on the UI thread so other threads can post work to it
         showRegistration = ThreadPool.RegisterWaitForSingleObject(showSignal, (_, _) =>
         {
-            try { marshal.BeginInvoke(new Action(ShowWindow)); }
+            try { marshal.BeginInvoke(new Action(() => ShowWindow(fromTrayIcon: false))); }
             catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException) { }
         }, null, Timeout.Infinite, false);
         var menu = new ContextMenuStrip
@@ -25,17 +25,17 @@ internal sealed class TrayContext : ApplicationContext
             Renderer = new ToolStripProfessionalRenderer(new PerfMenuColors()),
             ShowImageMargin = false, Padding = new Padding(5)
         };
-        var run = menu.Items.Add("Run Perf Test", null, async (_, _) => { ShowWindow(); await window.RunAsync(); });
-        menu.Items.Add("Show Status", null, (_, _) => ShowWindow());
+        var run = menu.Items.Add("Run Perf Test", null, async (_, _) => { ShowWindow(fromTrayIcon: true); await window.RunAsync(); });
+        menu.Items.Add("Show Status", null, (_, _) => ShowWindow(fromTrayIcon: true));
         menu.Items.Add("Open Results", null, (_, _) => OpenResults(true));
         menu.Items.Add("Open Results Folder", null, (_, _) => OpenResults(false));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, async (_, _) => { menu.Enabled = false; await window.StopAsync(); ExitThread(); });
         icon = new NotifyIcon { Icon = trayIcon, Text = "OnDemand Perf — ready", ContextMenuStrip = menu, Visible = true };
-        icon.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) ShowWindow(); };
+        icon.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) ShowWindow(fromTrayIcon: true); };
         window.RunCompleted += (_, summary) =>
         {
-            // The panel can be hidden while a test runs, so tell the user when it finishes.
+            // The panel can be hidden while a test runs, so tell the user how it ended, including failures.
             if (!window.Visible) icon.ShowBalloonTip(6000, "OnDemand Perf", summary.Length > 250 ? summary[..250] : summary, ToolTipIcon.Info);
         };
         window.StateChanged += (_, _) =>
@@ -46,7 +46,7 @@ internal sealed class TrayContext : ApplicationContext
         };
     }
 
-    internal void ShowWindow() => window.ShowNearTray();
+    internal void ShowWindow(bool fromTrayIcon) => window.ShowNearTray(fromTrayIcon);
 
     internal static void OpenResults(bool latest)
     {

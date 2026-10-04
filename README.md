@@ -18,8 +18,9 @@ RAM and disk in about 50 seconds. The panel shows live operations, elapsed time,
 while a test runs.
 
 - Click the tray icon or choose **Show Status** to reopen the panel. Closing it (or Escape) hides it while work continues;
-  a tray notification reports the outcome if the panel is hidden when the test finishes.
+  a tray notification reports the outcome (including failures and timeouts) if the panel is hidden when the test finishes.
 - **Cancel** requests a graceful stop; an unresponsive worker is terminated after a deadline. **Exit** cancels active work.
+  If the tray itself ends unexpectedly (crash, Task Manager, sign-out), Windows ends its worker too (job object).
 - The panel distinguishes completed, incomplete, cancelled and failed tests. Open Results is disabled during a run.
 - `OnDemandPerf.exe /show` opens the panel immediately without starting a test; if a tray is already running, it raises that
   tray's panel. Launching without arguments stays quiet. The tray is single-instance per Windows session.
@@ -58,8 +59,9 @@ the tray (`##stage <CPU|RAM|Disk>`, `##report <path>`); everything else is human
 
 Exit codes: `0` success; `1` component failure, incomplete stage or cancellation; `2` fatal error or invalid arguments;
 `3` another worker is running (including one owned by another account). Ctrl+C cancels a console run, and a controlling
-process can send `cancel` plus a newline to redirected standard input. The worker stops new work at 55 seconds to reserve
-cleanup/report time; the tray terminates the process at 60 seconds. A stalled operating-system I/O request can delay
+process can send a `cancel` line to redirected standard input (closing standard input does not cancel). The worker stops
+work at 55 seconds to reserve cleanup/report time: each stage ends early enough to keep its completed measurements, and a run
+that reaches the deadline is `Partial`, not `Cancelled`. The tray terminates the process at 60 seconds. A stalled operating-system I/O request can delay
 cancellation or termination, so external management should also enforce a process deadline.
 
 A machine-wide named mutex prevents overlapping worker executions; inability to access another identity's lock fails closed.

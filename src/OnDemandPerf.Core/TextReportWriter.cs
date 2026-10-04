@@ -7,8 +7,9 @@ public static class TextReportWriter
 {
     public static string Format(AnalysisResult result)
     {
+        // Every number in the report uses the invariant culture so reports read the same on every machine.
         var text = new StringBuilder();
-        void Line(string label, object? value) => text.AppendLine($"{label}: {value ?? "Unavailable"}");
+        void Line(string label, object? value) => text.AppendLine(FormattableString.Invariant($"{label}: {value ?? "Unavailable"}"));
         static string? Number(double? value, string unit) => value.HasValue
             ? value.Value.ToString("F1", CultureInfo.InvariantCulture) + unit : null;
         static string? Memory(ulong? bytes) => Number(bytes / (double?)(1024 * 1024 * 1024), " GiB");
@@ -29,7 +30,7 @@ public static class TextReportWriter
         Line("CPU base clock", result.Device?.CpuBaseMhz is { } mhz ? $"{mhz} MHz" : null);
         text.AppendLine();
         text.AppendLine("HARDWARE");
-        foreach (var line in HardwareSummary.Lines(result.Device)) Line(line.Label, line.Text);
+        foreach (var line in HardwareSummary.Lines(result.Device, CultureInfo.InvariantCulture)) Line(line.Label, line.Text);
         var hardware = result.Device?.Hardware;
         Line("Manufacturer", hardware?.Manufacturer);
         Line("Model", hardware?.Model);
@@ -40,7 +41,7 @@ public static class TextReportWriter
                 Line("RAM module " + (module.Slot ?? "?"),
                     string.Join(" · ", new[]
                     {
-                        $"{module.SizeBytes / 1073741824d:F0} GiB {module.Type ?? "unknown type"} {module.FormFactor}".Trim(),
+                        FormattableString.Invariant($"{module.SizeBytes / 1073741824d:F0} GiB {module.Type ?? "unknown type"} {module.FormFactor}").Trim(),
                         $"running {module.ConfiguredMts?.ToString() ?? "?"} / rated {module.RatedMts?.ToString() ?? "?"} MT/s",
                         $"{module.Manufacturer} {module.PartNumber}".Trim()
                     }.Where(part => part.Length > 0)));
@@ -113,12 +114,12 @@ public static class TextReportWriter
             Line("Total written", Number(disk.TotalBytesWritten / 1048576d, " MiB"));
             foreach (var test in disk.Measurements)
             {
-                Line(test.Operation, $"{Number(test.MBps, " MB/s")}; {test.Status}; {test.Operations} operations in {test.DurationSeconds:F3}s; {test.StopReason}");
+                Line(test.Operation, FormattableString.Invariant($"{Number(test.MBps, " MB/s")}; {test.Status}; {test.Operations} operations in {test.DurationSeconds:F3}s; {test.StopReason}"));
                 if (test.FirstPassMBps is { } firstPass)
                     Line("  First full pass of test file", $"{Number(firstPass, " MB/s")} (file read {test.FilePasses?.ToString("F1", CultureInfo.InvariantCulture)} times in total)");
                 if (test.ShortBurst) Line("  Sample quality", "Short burst (<1 second); not sustained performance");
                 if (test.BlockBytes == 4096)
-                    Line("  IOPS / average / p95 latency", $"{test.Iops:F0} / {test.MeanLatencyMs:F3} ms / {test.P95LatencyMs:F3} ms");
+                    Line("  IOPS / average / p95 latency", FormattableString.Invariant($"{test.Iops:F0} / {test.MeanLatencyMs:F3} ms / {test.P95LatencyMs:F3} ms"));
             }
             Line("Disk duration", Number(disk.DurationSeconds, " seconds"));
             Line("Test file cleanup", disk.CleanupSucceeded ? "Complete" : "Failed");

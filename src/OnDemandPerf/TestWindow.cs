@@ -31,11 +31,18 @@ internal sealed class TestWindow : Form
     private Task? runningTask;
     private bool cancelling;
     private string? reportPath;
+    private string? outcome;
+    private WorkerJob? job;
+    private Screen? placementScreen;
+    private int preferredHeight;
 
     internal bool IsRunning { get; private set; }
     internal string StatusText => status.Text;
     internal event EventHandler? StateChanged;
-    /// <summary>Raised when a run produced a report; the argument is a one-line summary suitable for a tray notification.</summary>
+    /// <summary>
+    /// Raised when a run ends for any reason other than the user cancelling it, including failures and timeouts; the argument
+    /// is a one-line summary suitable for a tray notification.
+    /// </summary>
     internal event EventHandler<string>? RunCompleted;
 
     public TestWindow()
@@ -174,13 +181,36 @@ internal sealed class TestWindow : Form
         if (Visible && !systemInfoRequested) { systemInfoRequested = true; _ = LoadSystemInfoAsync(); }
     }
 
-    internal void ShowNearTray()
+    /// <param name="fromTrayIcon">
+    /// True when the user clicked the tray icon or its menu, so the cursor is on the taskbar's monitor. Otherwise (a <c>/show</c>
+    /// launch) the cursor can be anywhere, and the primary monitor, which holds the notification area by default, is used.
+    /// </param>
+    internal void ShowNearTray(bool fromTrayIcon)
     {
-        var area = Screen.FromPoint(Cursor.Position).WorkingArea;
+        placementScreen = fromTrayIcon ? Screen.FromPoint(Cursor.Position) : Screen.PrimaryScreen ?? Screen.FromPoint(Cursor.Position);
+        if (preferredHeight > 0) PlaceNearTray(); // the first time, OnLoad places it once the form is scaled
         Show();
-        Location = new Point(Math.Max(area.Left, area.Right - Width - 12), Math.Max(area.Top, area.Bottom - Height - 12));
         Activate();
     }
+
+    protected override void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e); // DPI scaling is applied here, before the form becomes visible
+        preferredHeight = Height;
+        PlaceNearTray();
+    }
+
+    /// <summary>Bottom-right of the working area, shortened (the activity box absorbs it) when the screen is too short.</summary>
+    private void PlaceNearTray()
+    {
+        var area = (placementScreen ?? Screen.FromControl(this)).WorkingArea;
+        int margin = LogicalToDeviceUnits(12);
+        Height = Math.Max(LogicalToDeviceUnits(MinimumPanelHeight), Math.Min(preferredHeight, area.Height - margin * 2));
+        Location = new Point(Math.Max(area.Left, area.Right - Width - margin), Math.Max(area.Top, area.Bottom - Height - margin));
+    }
+
+    /// <summary>Every fixed row plus a few lines of activity; below this the layout would overlap.</summary>
+    private const int MinimumPanelHeight = 520;
 
     internal Task RunAsync()
     {
@@ -194,6 +224,7 @@ internal sealed class TestWindow : Form
         IsRunning = true;
         cancelling = false;
         reportPath = null;
+        outcome = null;
         run.Enabled = results.Enabled = false;
         cancel.Enabled = true;
         output.Clear();
@@ -214,6 +245,8 @@ internal sealed class TestWindow : Form
             start.ArgumentList.Add("/run");
             worker = Process.Start(start) ?? throw new InvalidOperationException("Unable to start worker.");
             var current = worker;
+            try { job ??= new WorkerJob(); job.Add(current); }
+            catch (System.ComponentModel.Win32Exception ex) { Append("Note: the worker will not stop by itself if the tray closes unexpectedly (" + ex.Message + ")."); }
             readers = Task.WhenAll(ReadAsync(current.StandardOutput), ReadAsync(current.StandardError));
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
             bool timedOut = false;
@@ -237,12 +270,14 @@ internal sealed class TestWindow : Form
                 SetStatus(timedOut ? "Test timed out" : cancelling ? "Test cancelled" : "Test could not finish");
                 Append(timedOut ? "Stopped after the 60-second deadline. No complete result is available."
                     : $"Worker exited with code {current.ExitCode}. No new report is available.");
+                outcome = status.Text + ". No new results.";
             }
         }
         catch (Exception ex)
         {
             SetStatus("Test could not finish");
             Append(ex.Message);
+            outcome = "Test could not finish: " + ex.Message;
         }
         finally
         {
@@ -251,7 +286,9 @@ internal sealed class TestWindow : Form
                 try { current.Kill(entireProcessTree: true); await current.WaitForExitAsync(); }
                 catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception) { Append(ex.Message); }
             }
-            try { await readers; } catch (IOException) { }
+            // Any reader failure was already reported by the catch above; this only observes it. Rethrowing from here would
+            // escape the async void click handlers and crash the tray.
+            try { await readers; } catch (Exception) { }
             worker?.Dispose(); worker = null;
             clock.Stop(); timer.Stop();
             elapsed.Text = $"{clock.Elapsed.TotalSeconds:F0}s elapsed · {DateTime.Now:t}";
@@ -261,6 +298,8 @@ internal sealed class TestWindow : Form
             IsRunning = false;
             run.Enabled = true; cancel.Enabled = false;
             StateChanged?.Invoke(this, EventArgs.Empty);
+            // A user who cancelled (or chose Exit) already knows; everyone else hears about every outcome, not just success.
+            if (!cancelling) RunCompleted?.Invoke(this, outcome ?? status.Text);
         }
     }
 
@@ -273,14 +312,13 @@ internal sealed class TestWindow : Form
         var disk = ResultSummary.DiskCard(report);
         foreach (var (card, value) in new[] { (cpuCard, cpu), (ramCard, ram), (diskCard, disk) })
             card.UpdateState(value.State, value.Value, value.Caption);
-        var headline = ResultSummary.Headline(report);
-        SetStatus(headline);
+        SetStatus(ResultSummary.Headline(report));
+        outcome = ResultSummary.Notification(report);
         var activity = output.Text;
         output.Text = string.Join(Environment.NewLine, ResultSummary.Lines(report)) + "\r\n\r\nActivity\r\n" + activity;
         output.SelectionStart = 0;
         output.SelectionLength = 0;
         output.ScrollToCaret();
-        RunCompleted?.Invoke(this, $"{headline}. CPU {cpu.Value} MB/s · RAM {ram.Value} GB/s · Disk {disk.Value} MB/s");
     }
 
     private async Task ReadAsync(StreamReader reader)
@@ -340,7 +378,7 @@ internal sealed class TestWindow : Form
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { timer.Dispose(); tips.Dispose(); }
+        if (disposing) { timer.Dispose(); tips.Dispose(); job?.Dispose(); }
         base.Dispose(disposing);
     }
 }

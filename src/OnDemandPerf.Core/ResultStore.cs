@@ -51,7 +51,14 @@ public sealed class ResultStore(string directory, bool compact = false)
         var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            File.WriteAllText(temporary, content);
+            // Flush to the device before the rename, or a power cut can leave the renamed file empty.
+            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            using (var writer = new StreamWriter(stream)) // UTF-8 without a BOM, as File.WriteAllText wrote
+            {
+                writer.Write(content);
+                writer.Flush();
+                stream.Flush(flushToDisk: true);
+            }
             File.Move(temporary, path, true);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }

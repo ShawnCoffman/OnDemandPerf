@@ -19,7 +19,7 @@ internal static class Program
         }
         ApplicationConfiguration.Initialize();
         using var context = new TrayContext(showSignal);
-        if (show) context.ShowWindow();
+        if (show) context.ShowWindow(fromTrayIcon: false);
         Application.Run(context);
     }
 }

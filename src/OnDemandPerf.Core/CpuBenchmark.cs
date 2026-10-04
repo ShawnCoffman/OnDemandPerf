@@ -16,10 +16,13 @@ public static class CpuBenchmark
     public static string Profile { get; } = ProfileHash.Compute("deflate-v3", DatasetId, InputBytes, WarmupMilliseconds,
         SingleMilliseconds, MultiMilliseconds, PassCount, "Optimal");
 
-    public static CpuResult Run(CancellationToken cancellationToken, Action<string> progress)
+    /// <param name="cancellationToken">User cancellation only; time limits come from the budget and <paramref name="available"/>.</param>
+    /// <param name="available">Time left in the run for this stage; the stage stops at this or its own budget, whichever is sooner.</param>
+    public static CpuResult Run(CancellationToken cancellationToken, Action<string> progress, TimeSpan? available = null)
     {
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        budget.CancelAfter(TimeSpan.FromSeconds(BudgetSeconds));
+        var limit = StageBudget.Limit(BudgetSeconds, available);
+        budget.CancelAfter(limit);
         var timer = Stopwatch.StartNew();
         var result = new CpuResult { WorkerCount = Environment.ProcessorCount };
         var data = CreateDataset(InputBytes);
@@ -33,7 +36,7 @@ public static class CpuBenchmark
         {
             // A busy or slow machine is exactly when a partial answer is most useful: keep completed stages, flag the rest.
             result.Status = "TimedOut";
-            result.QualityNotes.Add($"CPU stage exceeded its {BudgetSeconds}-second safety budget; the unfinished stage has no score and completed stages are kept.");
+            result.QualityNotes.Add($"CPU stage reached its {limit.TotalSeconds:F1}-second time limit (its {BudgetSeconds}-second safety budget or the time left in the run); the unfinished stage has no score and completed stages are kept.");
         }
         result.OutputVerified = result.SingleThread is not null && result.MultiThread is not null;
         result.DurationSeconds = timer.Elapsed.TotalSeconds;

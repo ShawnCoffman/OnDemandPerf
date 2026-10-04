@@ -201,6 +201,23 @@ Test("ResultSummary headline and lines", () =>
     Check(lines.Any(l => l.Contains("(first full pass)")), "first-pass line");
     Check(lines.Any(l => l.StartsWith("Disk random read: 14,516 IOPS")), "random read line");
 });
+Test("ResultSummary notification names only the stages that produced a score", () =>
+{
+    var r = Sample();
+    Check(ResultSummary.Notification(r) == "Test complete. CPU 1,588.6 MB/s · RAM 5.9 GB/s · Disk 1,800.5 MB/s", ResultSummary.Notification(r));
+    r.Status = "Partial"; r.Disk!.Status = "TimedOut"; r.Memory = null;
+    string partial = ResultSummary.Notification(r);
+    Check(partial.StartsWith("Test complete — review incomplete tests. CPU") && !partial.Contains("RAM") && !partial.Contains('—' + " MB/s"), partial);
+    r.Status = "Failed"; r.Cpu = null; r.Disk = null;
+    Check(ResultSummary.Notification(r) == "Test failed", "no scores, headline only");
+});
+Test("StageBudget uses the sooner of the stage budget and the time left in the run", () =>
+{
+    Check(StageBudget.Limit(22, null) == TimeSpan.FromSeconds(22), "no run deadline");
+    Check(StageBudget.Limit(22, TimeSpan.FromSeconds(30)) == TimeSpan.FromSeconds(22), "plenty of time");
+    Check(StageBudget.Limit(22, TimeSpan.FromSeconds(9.5)) == TimeSpan.FromSeconds(9.5), "short of time");
+    Check(StageBudget.Limit(22, TimeSpan.FromSeconds(-3)) == TimeSpan.Zero, "already late");
+});
 Test("TextReportWriter handles full and mostly empty results", () =>
 {
     string full = TextReportWriter.Format(Sample());
@@ -387,6 +404,36 @@ Test("HardwareSummary hints flag single-channel RAM, low RAM speed and spinning 
     var healthy = LaptopDevice();
     healthy.InstalledMemory!.ConfiguredMts = 5600;
     Check(HardwareSummary.Hints(healthy).Count == 0, "no hints for a healthy configuration");
+});
+Test("HardwareSummary does not suggest XMP/EXPO for laptop memory or on absurd firmware speeds", () =>
+{
+    foreach (byte formFactor in new byte[] { 13, 11, 17 }) // SODIMM, soldered (row of chips), CAMM
+    {
+        var laptop = LaptopDevice();
+        foreach (var module in laptop.InstalledMemory!.Modules)
+            module.FormFactor = Smbios.FormFactorName(formFactor);
+        Check(!HardwareSummary.Hints(laptop).Any(h => h.Contains("XMP")), $"form factor {formFactor}");
+        Check(HardwareSummary.Ram(laptop.InstalledMemory).Contains("rated 5600"), "the rated speed is still shown");
+    }
+    Check(Smbios.FormFactorName(17) == "CAMM", "CAMM name");
+    var huge = LaptopDevice();
+    huge.InstalledMemory!.ConfiguredMts = 50_000_000; huge.InstalledMemory.RatedMts = 50_000_000; // overflowed 32-bit math
+    Check(!HardwareSummary.Hints(huge).Any(h => h.Contains("XMP")), "equal speeds are never below rated");
+});
+Test("Text report numbers do not depend on the user's culture", () =>
+{
+    var original = CultureInfo.CurrentCulture;
+    try
+    {
+        var r = Sample();
+        r.Device = LaptopDevice();
+        CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("de-DE");
+        string report = TextReportWriter.Format(r);
+        Check(report.Contains("1.7 GHz base") && !report.Contains("1,7 GHz"), "hardware line");
+        Check(report.Contains("operations in 0.210s") && report.Contains("78135 / 0.013 ms / 0.015 ms"), "disk lines");
+        Check(HardwareSummary.Cpu(r.Device).Contains("1,7 GHz"), "the panel still follows the user's culture");
+    }
+    finally { CultureInfo.CurrentCulture = original; }
 });
 Test("Hardware identity survives the JSON round trip and reaches the report", () =>
 {

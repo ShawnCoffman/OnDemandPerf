@@ -20,12 +20,18 @@ public static class DiskBenchmark
         SeqReadMilliseconds, RandomBlockBytes, RandomWriteMaxOperations, RandomWriteMilliseconds, ObservationWindowMilliseconds,
         RandomWriteSeed, RandomReadSeed);
     public static string DefaultDirectory => Path.Combine(ResultStore.DefaultDirectory, "TestData");
-    public static DiskResult Run(string directory, CancellationToken token, Action<string> progress)
+    /// <summary>Time kept back after the random-read window for its verification and the end of the stage.</summary>
+    internal const int RandomReadReserveMilliseconds = 500;
+
+    /// <param name="token">User cancellation only; time limits come from the budget and <paramref name="available"/>.</param>
+    /// <param name="available">Time left in the run for this stage; the stage stops at this or its own budget, whichever is sooner.</param>
+    public static DiskResult Run(string directory, CancellationToken token, Action<string> progress, TimeSpan? available = null)
     {
         var result = new DiskResult { TargetDirectory = Path.GetFullPath(directory) };
         var total = Stopwatch.StartNew();
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(token);
-        budget.CancelAfter(TimeSpan.FromSeconds(BudgetSeconds));
+        var limit = StageBudget.Limit(BudgetSeconds, available);
+        budget.CancelAfter(limit);
         string? path = null;
         bool owned = false;
         try
@@ -91,9 +97,10 @@ public static class DiskBenchmark
                     if (!file.Matches(pattern, (int)(offset % block), 4096)) throw new InvalidDataException("Random write verification failed.");
                 }
                 result.Measurements.Add(randomWrite with { Verified = true });
-                // Fill the remainder of the 16-second disk observation window with useful read samples.
-                // The 22-second safety deadline still bounds unusually slow I/O and verification.
-                int remainingReadMs = Math.Max(1000, ObservationWindowMilliseconds - (int)total.ElapsedMilliseconds);
+                // Fill the remainder of the 16-second disk observation window with useful read samples, ending early enough
+                // to finish inside the stage's time limit when the run is short of time. The limit still bounds slow I/O.
+                int windowEndMs = Math.Min(ObservationWindowMilliseconds, (int)limit.TotalMilliseconds - RandomReadReserveMilliseconds);
+                int remainingReadMs = Math.Max(1000, windowEndMs - (int)total.ElapsedMilliseconds);
                 progress($"Disk random read: 4 KiB, queue depth 1, {remainingReadMs / 1000d:F1}-second observation...");
                 randomState = RandomReadSeed;
                 var randomRead = Measure("RandomRead", RandomBlockBytes, 1_000_000, remainingReadMs, RandomOffset, false, file, budget.Token);
@@ -106,7 +113,7 @@ public static class DiskBenchmark
             }
         }
         catch (NotSupportedException ex) { result.Status = "Unsupported"; result.Notes.Add(ex.Message); }
-        catch (OperationCanceledException) { result.Status = token.IsCancellationRequested ? "Cancelled" : "TimedOut"; result.Notes.Add("Disk stage cancelled or exceeded its 22-second budget; completed measurements retained."); }
+        catch (OperationCanceledException) { result.Status = token.IsCancellationRequested ? "Cancelled" : "TimedOut"; result.Notes.Add("Disk stage cancelled or reached its time limit; completed measurements retained."); }
         catch (Exception ex) { result.Status = "Failed"; result.Notes.Add(ex.Message); }
         finally
         {

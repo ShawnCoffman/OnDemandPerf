@@ -17,12 +17,14 @@ public static class MemoryBenchmark
     public static string Profile { get; } = ProfileHash.Compute("memory-v3", MaxBufferBytes, MinBufferBytes, PassMilliseconds,
         PassesPerOperation, MultiPassMilliseconds, MaxMultiWorkers, MemoryLatencyBenchmark.Profile);
 
-    public static MemoryResult Run(CancellationToken token, Action<string> progress)
+    /// <param name="token">User cancellation only; time limits come from the budget and <paramref name="available"/>.</param>
+    /// <param name="available">Time left in the run for this stage; the stage stops at this or its own budget, whichever is sooner.</param>
+    public static MemoryResult Run(CancellationToken token, Action<string> progress, TimeSpan? available = null)
     {
         var result = new MemoryResult();
         var timer = Stopwatch.StartNew();
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(token);
-        budget.CancelAfter(TimeSpan.FromSeconds(BudgetSeconds));
+        budget.CancelAfter(StageBudget.Limit(BudgetSeconds, available));
         try
         {
             var status = new WindowsNative.MemoryStatus { Length = (uint)Marshal.SizeOf<WindowsNative.MemoryStatus>() };
@@ -88,7 +90,7 @@ public static class MemoryBenchmark
             result.Latency = new MemoryLatencyResult { WorkingSetBytes = size };
             MemoryLatencyBenchmark.Run(source, result.Latency, budget.Token, progress);
         }
-        catch (OperationCanceledException) { result.Status = token.IsCancellationRequested ? "Cancelled" : "TimedOut"; result.Notes.Add("RAM deadline or cancellation reached; only completed measurements are reported."); }
+        catch (OperationCanceledException) { result.Status = token.IsCancellationRequested ? "Cancelled" : "TimedOut"; result.Notes.Add("RAM time limit or cancellation reached; only completed measurements are reported."); }
         catch (Exception ex) { result.Status = "Failed"; result.Notes.Add(ex.Message); }
         finally { result.DurationSeconds = timer.Elapsed.TotalSeconds; }
         return result;

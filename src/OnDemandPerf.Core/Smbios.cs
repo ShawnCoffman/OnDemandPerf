@@ -146,7 +146,7 @@ internal static class Smbios
 
     internal static string? FormFactorName(int code) => code switch
     {
-        9 => "DIMM", 13 => "SODIMM", 15 => "FB-DIMM", 5 or 10 or 11 or 16 => "Soldered", _ => null
+        9 => "DIMM", 13 => "SODIMM", 15 => "FB-DIMM", 17 => "CAMM", 5 or 10 or 11 or 16 => "Soldered", _ => null
     };
 
     private static List<string> ReadStrings(byte[] table, int start, int end)

@@ -3,7 +3,9 @@
   <ItemGroup><EmbeddedResource Include="Assets/OnDemandPerf.ico" /></ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../OnDemandPerf.Core/OnDemandPerf.Core.csproj" />
-    <ProjectReference Include="../OnDemandPerf.Worker/OnDemandPerf.Worker.csproj" ReferenceOutputAssembly="false" />
+    <!-- Build order only. Private=false stops the SDK copying the worker's apphost, deps and runtimeconfig (without its dll)
+         next to the tray; the worker is shipped complete in worker/ by CopyWorker below. -->
+    <ProjectReference Include="../OnDemandPerf.Worker/OnDemandPerf.Worker.csproj" ReferenceOutputAssembly="false" Private="false" />
   </ItemGroup>
   <Target Name="CopyWorker" AfterTargets="Build">
     <ItemGroup><WorkerFiles Include="../OnDemandPerf.Worker/bin/$(Configuration)/$(TargetFramework)/*" /></ItemGroup>

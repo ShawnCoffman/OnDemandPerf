@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased — review fixes
+
+Result schema and benchmark profiles are unchanged; scores stay comparable with 0.7.0.
+
+### Fixed
+- A run that reaches the 55-second work deadline is no longer reported as "Test cancelled". User cancellation and the deadline
+  are tracked separately; each stage also stops one second before the deadline (the disk random-read window shortens to fit),
+  so a late stage ends `TimedOut` with its measurements and the run is `Partial`. Only user cancellation gives `Cancelled`.
+- The tray notification now covers failures, timeouts and worker crashes, not just completed runs, and lists only the stages
+  that produced a score (no more "CPU — MB/s").
+- The worker is in a job object owned by the tray, so it is ended if the tray crashes, is killed or the user signs out.
+  The worker's standard-input reader now accepts `cancel` on any line.
+- A reader error during cleanup could escape an async event handler and crash the tray.
+- The RAM "XMP/EXPO may be off" hint no longer appears for laptop memory (SODIMM, CAMM, soldered); CAMM modules are
+  recognised; the below-rated check cannot overflow on bad firmware values.
+- The panel shrinks to fit short screens, is positioned before it appears, and `/show` places it on the primary monitor
+  instead of wherever the cursor is.
+- The build no longer leaves a stray `OnDemandPerf.Worker.exe` (without its dll) next to the tray, and `Build.ps1` starts
+  from empty output folders and refuses to run while the built tray is running.
+- The text report formats every number with the invariant culture.
+- Ctrl+C after a console run finished no longer throws; report files are flushed to disk before they replace the old ones.
+
 ## 0.7.0 (2026-10-01) — hardware identity
 
 Result schema 2.1 (additive, see `docs/schema.md`). Benchmark profiles are unchanged, so scores stay comparable with 0.6.0.

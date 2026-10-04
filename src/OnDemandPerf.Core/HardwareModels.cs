@@ -19,7 +19,7 @@ public sealed class MemoryModuleInfo
     public ulong SizeBytes { get; set; }
     /// <summary>"DDR4", "DDR5", "LPDDR5" and so on; null when the firmware reports unknown.</summary>
     public string? Type { get; set; }
-    /// <summary>"DIMM", "SODIMM" or "Soldered"; null when unknown.</summary>
+    /// <summary>"DIMM", "SODIMM", "CAMM" or "Soldered"; null when unknown.</summary>
     public string? FormFactor { get; set; }
     /// <summary>Speed the module is rated for, in MT/s.</summary>
     public uint? RatedMts { get; set; }

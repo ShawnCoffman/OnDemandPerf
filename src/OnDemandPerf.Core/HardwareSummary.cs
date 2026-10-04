@@ -14,12 +14,13 @@ public static class HardwareSummary
     private const string Unavailable = "Unavailable";
     private const string Separator = " · ";
 
-    public static IReadOnlyList<SystemLine> Lines(DeviceInfo? device) =>
+    /// <param name="culture">Number format; the panel uses the user's culture (the default), the text report the invariant one.</param>
+    public static IReadOnlyList<SystemLine> Lines(DeviceInfo? device, IFormatProvider? culture = null) =>
     [
         new("SYSTEM", Machine(device)),
-        new("CPU", Cpu(device)),
-        new("RAM", Ram(device?.InstalledMemory)),
-        new("DISK", Disk(device?.TestDrive))
+        new("CPU", Cpu(device, culture)),
+        new("RAM", Ram(device?.InstalledMemory, culture)),
+        new("DISK", Disk(device?.TestDrive, culture))
     ];
 
     public static string Machine(DeviceInfo? device)
@@ -44,7 +45,7 @@ public static class HardwareSummary
         return string.Join(Separator, parts);
     }
 
-    public static string Cpu(DeviceInfo? device)
+    public static string Cpu(DeviceInfo? device, IFormatProvider? culture = null)
     {
         if (device is null || device.CpuName == "Unavailable") return Unavailable;
         string name = device.CpuName.Replace("(R)", "").Replace("(TM)", "").Replace("(tm)", "");
@@ -55,29 +56,29 @@ public static class HardwareSummary
         uint threads = device.SystemLogicalProcessors ?? (uint)device.LogicalProcessors;
         parts.Add(device.PhysicalCores is { } cores ? $"{cores} cores / {threads} threads" : $"{threads} threads");
         if (device.CpuBaseMhz is { } mhz)
-            parts.Add((mhz / 1000d).ToString("F1", CultureInfo.CurrentCulture) + " GHz base");
+            parts.Add((mhz / 1000d).ToString("F1", culture ?? CultureInfo.CurrentCulture) + " GHz base");
         return string.Join(Separator, parts);
     }
 
-    public static string Ram(InstalledMemory? memory)
+    public static string Ram(InstalledMemory? memory, IFormatProvider? culture = null)
     {
         if (memory is null || memory.ModuleCount == 0) return "Module details unavailable";
         var parts = new List<string>();
         string? type = memory.Type;
         uint? speed = memory.ConfiguredMts ?? memory.RatedMts;
-        string headline = FormatBytes(memory.TotalBytes);
+        string headline = FormatBytes(memory.TotalBytes, culture);
         if (type is not null) headline += " " + type + (speed is { } s ? "-" + s : "");
         else if (speed is { } only) headline += " " + only + " MT/s";
         parts.Add(headline);
         var sizes = memory.Modules.Select(m => m.SizeBytes).Distinct().ToList();
-        parts.Add(sizes.Count == 1 ? $"{memory.ModuleCount} × {FormatBytes(sizes[0])}" : $"{memory.ModuleCount} modules (mixed sizes)");
+        parts.Add(sizes.Count == 1 ? $"{memory.ModuleCount} × {FormatBytes(sizes[0], culture)}" : $"{memory.ModuleCount} modules (mixed sizes)");
         if (memory.Modules.All(m => m.FormFactor == "Soldered")) parts.Add("soldered");
         else if (memory.SlotCount is { } slots && slots >= memory.ModuleCount) parts.Add($"{memory.ModuleCount} of {slots} slots");
         if (IsBelowRated(memory)) parts.Add($"rated {memory.RatedMts}");
         return string.Join(Separator, parts);
     }
 
-    public static string Disk(DriveIdentity? drive)
+    public static string Disk(DriveIdentity? drive, IFormatProvider? culture = null)
     {
         if (drive is null || (drive.Model is null && drive.BusType is null)) return Unavailable;
         var parts = new List<string> { drive.Model ?? "Unknown model" };
@@ -89,7 +90,8 @@ public static class HardwareSummary
             parts.Add(string.Join(' ', new[] { bus, kind }.Where(x => !string.IsNullOrEmpty(x))));
         }
         string? volume = drive.Volume?.TrimEnd('\\');
-        if (drive.SizeBytes is { } size) parts.Add(volume is null ? FormatCapacity(size) : $"{volume} ({FormatCapacity(size)})");
+        if (drive.SizeBytes is { } size)
+            parts.Add(volume is null ? FormatCapacity(size, culture) : $"{volume} ({FormatCapacity(size, culture)})");
         else if (volume is not null) parts.Add(volume);
         return string.Join(Separator, parts.Where(p => p.Length > 0));
     }
@@ -102,7 +104,8 @@ public static class HardwareSummary
         {
             if (memory.ModuleCount == 1 && memory.SlotCount is > 1 && memory.Modules[0].FormFactor != "Soldered")
                 hints.Add("RAM: a single module in a multi-slot machine usually means single-channel memory and lower bandwidth.");
-            if (IsBelowRated(memory))
+            // Laptop memory often runs below its rating because of the platform, and there is no XMP/EXPO profile to enable.
+            if (IsBelowRated(memory) && !IsLaptopMemory(memory))
                 hints.Add($"RAM: running at {memory.ConfiguredMts} MT/s but rated for {memory.RatedMts}; an XMP/EXPO profile may be off.");
         }
         if (device?.TestDrive is { } drive)
@@ -117,20 +120,26 @@ public static class HardwareSummary
         return hints;
     }
 
+    // 64-bit arithmetic: firmware speeds are untrusted and can be large enough to overflow 32 bits when scaled.
     private static bool IsBelowRated(InstalledMemory memory) =>
-        memory.ConfiguredMts is { } configured && memory.RatedMts is { } rated && configured * 100 < rated * 95L;
+        memory.ConfiguredMts is { } configured && memory.RatedMts is { } rated && configured * 100UL < rated * 95UL;
 
-    private static string FormatBytes(ulong bytes)
+    private static bool IsLaptopMemory(InstalledMemory memory) =>
+        memory.Modules.Count > 0 && memory.Modules.All(m => m.FormFactor is "SODIMM" or "Soldered" or "CAMM");
+
+    private static string FormatBytes(ulong bytes, IFormatProvider? culture)
     {
+        culture ??= CultureInfo.CurrentCulture;
         double gib = bytes / 1073741824d;
-        return (gib >= 1 ? Math.Round(gib).ToString("F0", CultureInfo.CurrentCulture) + " GB"
-            : Math.Round(bytes / 1048576d).ToString("F0", CultureInfo.CurrentCulture) + " MB");
+        return (gib >= 1 ? Math.Round(gib).ToString("F0", culture) + " GB"
+            : Math.Round(bytes / 1048576d).ToString("F0", culture) + " MB");
     }
 
-    private static string FormatCapacity(ulong bytes)
+    private static string FormatCapacity(ulong bytes, IFormatProvider? culture)
     {
+        culture ??= CultureInfo.CurrentCulture;
         double gb = bytes / 1e9;
-        return gb >= 1000 ? (gb / 1000).ToString("0.#", CultureInfo.CurrentCulture) + " TB"
-            : Math.Round(gb).ToString("F0", CultureInfo.CurrentCulture) + " GB";
+        return gb >= 1000 ? (gb / 1000).ToString("0.#", culture) + " TB"
+            : Math.Round(gb).ToString("F0", culture) + " GB";
     }
 }

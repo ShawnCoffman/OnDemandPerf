@@ -42,19 +42,31 @@ internal static class Program
         }
     }
 
+    /// <summary>Work stops here, leaving five seconds of the tray's 60-second limit for cleanup and output.</summary>
+    private static readonly TimeSpan WorkDeadline = TimeSpan.FromSeconds(55);
+    /// <summary>Each stage must end this long before the work deadline so it can finish as TimedOut with its measurements.</summary>
+    private static readonly TimeSpan StageReserve = TimeSpan.FromSeconds(1);
+
     private static int Run(string mode, string directory, string diskDirectory, bool compact)
     {
         var store = new ResultStore(directory, compact);
         var result = new AnalysisResult();
         var timer = Stopwatch.StartNew();
-        // Leave five seconds of the overall 60-second budget for cleanup and output.
-        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(55));
-        Console.CancelKeyPress += (_, e) => { e.Cancel = true; cancellation.Cancel(); };
+        // User cancellation and the work deadline are kept apart so a slow machine is never reported as "cancelled".
+        // Stages get only the user token plus the time left; the linked token covers the work between stages.
+        using var userCancel = new CancellationTokenSource();
+        using var deadline = new CancellationTokenSource(WorkDeadline);
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(userCancel.Token, deadline.Token);
+        TimeSpan Available() => WorkDeadline - StageReserve - timer.Elapsed;
+        void RequestCancel() { try { userCancel.Cancel(); } catch (ObjectDisposedException) { } } // Ctrl+C can arrive after the run
+        Console.CancelKeyPress += (_, e) => { e.Cancel = true; RequestCancel(); };
         if (Console.IsInputRedirected)
             _ = Task.Run(async () =>
             {
-                if (await Console.In.ReadLineAsync() == "cancel")
-                    try { cancellation.Cancel(); } catch (ObjectDisposedException) { }
+                // Any "cancel" line cancels. End of input does not: callers that redirect from NUL still get a full run.
+                // The tray covers its own exit with a job object instead.
+                while (await Console.In.ReadLineAsync() is { } line)
+                    if (line.Trim() == "cancel") { RequestCancel(); return; }
             });
         store.Log($"INFO Run {result.RunId} started ({mode}), version {result.ApplicationVersion}");
         try { result.Device = SystemInventory.Collect(result.Warnings, diskDirectory); }
@@ -70,7 +82,13 @@ internal static class Program
             cancellation.Token.ThrowIfCancellationRequested();
             void Stage(string name, Action action)
             {
-                cancellation.Token.ThrowIfCancellationRequested();
+                userCancel.Token.ThrowIfCancellationRequested();
+                if (Available() <= TimeSpan.Zero)
+                {
+                    result.Status = "Partial";
+                    result.Errors.Add($"{name}: not started; the run reached its {WorkDeadline.TotalSeconds:F0}-second work deadline.");
+                    return;
+                }
                 activity.Stage = name;
                 Console.WriteLine("##stage " + name); // structured marker; the tray must not infer stages from prose
                 store.Log($"INFO {name} stage started");
@@ -81,23 +99,28 @@ internal static class Program
             }
             if (mode is "/cpu" or "/run")
             {
-                Stage("CPU", () => result.Cpu = CpuBenchmark.Run(cancellation.Token, Console.WriteLine));
+                Stage("CPU", () => result.Cpu = CpuBenchmark.Run(userCancel.Token, Console.WriteLine, Available()));
                 if (result.Cpu is { Status: not "Success" }) { result.Status = "Partial"; result.Errors.Add("CPU: " + result.Cpu.Status); }
             }
             if (mode is "/memory" or "/run")
             {
-                Stage("RAM", () => result.Memory = MemoryBenchmark.Run(cancellation.Token, Console.WriteLine));
+                Stage("RAM", () => result.Memory = MemoryBenchmark.Run(userCancel.Token, Console.WriteLine, Available()));
                 GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: false);
                 if (result.Memory is { Status: not "Success" }) { result.Status = "Partial"; result.Errors.Add("RAM: " + result.Memory.Status); }
             }
             if (mode is "/disk" or "/run")
             {
-                Stage("Disk", () => result.Disk = DiskBenchmark.Run(diskDirectory, cancellation.Token, Console.WriteLine));
+                Stage("Disk", () => result.Disk = DiskBenchmark.Run(diskDirectory, userCancel.Token, Console.WriteLine, Available()));
                 if (result.Disk is { Status: not "Success" }) { result.Status = "Partial"; result.Errors.Add("Disk: " + result.Disk.Status); }
             }
-            cancellation.Token.ThrowIfCancellationRequested();
+            userCancel.Token.ThrowIfCancellationRequested();
         }
-        catch (OperationCanceledException) { result.Status = "Cancelled"; result.Errors.Add("Run cancelled or reached the 55-second work deadline (60 seconds including cleanup/output)."); }
+        catch (OperationCanceledException) when (userCancel.IsCancellationRequested) { result.Status = "Cancelled"; result.Errors.Add("Run cancelled."); }
+        catch (OperationCanceledException)
+        {
+            result.Status = "Partial";
+            result.Errors.Add($"Run reached its {WorkDeadline.TotalSeconds:F0}-second work deadline (60 seconds including cleanup/output); completed measurements are kept.");
+        }
         catch (Exception ex) { result.Status = "Failed"; result.Errors.Add("Run: " + ex.Message); }
         activity.Dispose();
         result.Activity = activity.Result;

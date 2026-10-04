@@ -12,9 +12,11 @@ Current profiles: `deflate-v3`, `memory-v3` (includes `dependent-access-v1`), `d
 
 Full analysis targets about 50 seconds with a 55-second cooperative work deadline and a 60-second tray termination deadline.
 Indicative split: environment baseline 2 s, CPU about 16 s, RAM about 17 s (single-thread bandwidth about 9 s, multithread about
-3.5 s, latency about 5 s), disk about 16 s. Stage safety budgets are CPU 20 s, RAM 21 s, disk 22 s; the global 55-second deadline
-still wins, so on a slow machine later stages can be cut short. The tool never pads a run with sleeps. Individual OS requests
-can overrun cooperative limits.
+3.5 s, latency about 5 s), disk about 16 s. Stage safety budgets are CPU 20 s, RAM 21 s, disk 22 s. Each stage also stops one
+second before the global 55-second deadline, whichever is sooner, so on a slow machine a late stage ends `TimedOut` with its
+completed measurements (the disk stage shortens its random-read window to fit), a stage with no time left is not started, and
+the run is `Partial`. Only user cancellation produces a `Cancelled` run. The tool never pads a run with sleeps. Individual OS
+requests can overrun cooperative limits.
 
 ## Statistics
 
@@ -38,8 +40,8 @@ hardware stability test).
 - Per-pass process CPU seconds and average busy logical processors are diagnostics that include small coordination overheads.
 - "Single-thread" means one worker, not a fixed affinity. On hybrid CPUs Windows may place it on a performance or an efficiency
   core, which can move the result noticeably between runs.
-- If the stage exceeds its 20 s budget, completed stages are kept, the unfinished stage has no score, and the stage status is
-  `TimedOut`. User cancellation or the global deadline still produces a Cancelled run without a partial aggregate.
+- If the stage reaches its time limit (its 20 s budget or the time left in the run), completed stages are kept, the unfinished
+  stage has no score, and the stage status is `TimedOut`. User cancellation produces a Cancelled run without a partial aggregate.
 - The result depends on the runtime's Deflate implementation, so the .NET version matters.
 
 ## RAM (`memory-v3`)
@@ -83,7 +85,7 @@ cache. Hardware caches, controller or SAN caches, filters, deduplication and fir
   reads. Bytes are inverted from the initial pattern so writes change the file; every completed location is read back and
   verified outside timing.
 - **Random read**: 4 KiB at deterministic offsets, queue depth 1, filling the remainder of the 16 s observation window (minimum
-  1 s, capped at one million operations). Offsets use a **different seed from the writes**; in v2 they shared a seed, so the
+  1 s, capped at one million operations; shorter when the run is short of time, see the time budget). Offsets use a **different seed from the writes**; in v2 they shared a seed, so the
   first 16,384 reads hit just-written blocks that could still be in a write cache.
 - Total issued write payload is capped at 1,088 MiB per completed test, excluding filesystem metadata and write amplification.
   Actual bytes are recorded even on cancellation.
@@ -112,8 +114,11 @@ measurement; it lets results be grouped by model and read against what the hardw
   Identify Controller data. The size is the volume capacity because the raw disk length needs administrator access. Drives behind
   a RAID controller, Storage Spaces or a virtualization layer may report the controller instead of the drive.
 - **CPU base clock**: the registry's nominal MHz. It says nothing about turbo or current frequency.
-- **Hints**: the panel and report flag a single module in a multi-slot machine (likely single-channel), RAM configured more than
-  5% below its rated speed (an XMP/EXPO profile may be off), a spinning disk, and USB storage. They are prompts, not diagnoses.
+- **Hints**: the panel and report flag a single module in a multi-slot machine (likely single-channel), desktop RAM configured
+  more than 5% below its rated speed (an XMP/EXPO profile may be off), a spinning disk, and USB storage. They are prompts, not
+  diagnoses. The speed hint is skipped for laptop memory (SODIMM, CAMM, soldered), which often runs below its rating by design
+  and has no profile to enable. It also cannot catch the commonest XMP-off case: many boards then report the JEDEC speed as
+  both rated and configured, and the XMP rating itself lives in the module's SPD data, which needs administrator access.
 
 ## Environment and activity
 
