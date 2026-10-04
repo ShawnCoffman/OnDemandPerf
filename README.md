@@ -1,16 +1,26 @@
 # OnDemand Perf
 
-Windows tray utility with on-demand CPU, RAM and storage tests. Version 0.7.0 (prototype).
+A small Windows tray app that checks how fast a PC's CPU, RAM and storage really are, on demand, in about 50 seconds. It
+sits quietly in the notification area using no CPU until you ask it to run a test, then shows live progress, a compact
+summary and a full text/JSON report. It also identifies the hardware (make and model, CPU, RAM modules and speed, test
+drive) and points out common causes of slowness, such as a single RAM module, RAM below its rated speed, a spinning disk or
+USB storage.
+
+It is useful for a quick health check of a machine, comparing a PC before and after a change, or spotting a laptop that is
+much slower than its siblings. It is early-stage software: see [Limitations](#limitations) and the [changelog](CHANGELOG.md).
 
 Documentation: [methodology](docs/methodology.md) (what each test measures and its limits) ·
 [result schema](docs/schema.md) · [changelog](CHANGELOG.md) · [working notes](docs/notes/).
 
-## Try it
+## Getting started
 
-1. Build with `pwsh -File scripts/Build.ps1` (requires the .NET 10 SDK).
-2. Double-click `artifacts/OnDemandPerf/OnDemandPerf.exe`.
-3. Find the icon in the Windows system tray (possibly in the hidden-icons menu), right-click it and choose **Run Perf Test**.
-   A compact panel opens above the taskbar on that monitor.
+There is no installer or prebuilt download yet; build it from source.
+
+1. Install the [.NET 10 SDK](https://dotnet.microsoft.com/download) and PowerShell 7.
+2. Build with `pwsh -File scripts/Build.ps1`.
+3. Double-click `artifacts/OnDemandPerf/OnDemandPerf.exe`.
+4. Find the icon in the Windows notification area (possibly in the hidden-icons menu), right-click it and choose
+   **Run Perf Test**. A compact panel opens above the taskbar.
 
 The tray starts quietly: no inventory or benchmark runs at startup. **Run Perf Test** is the only run command and tests CPU,
 RAM and disk in about 50 seconds. The panel shows live operations, elapsed time, an activity log and a compact summary, with
@@ -31,7 +41,10 @@ while a test runs.
 - After a run, the cards show CPU multithread MB/s, RAM copy GB/s and disk sequential-read MB/s (first full pass of the test
   file); the log and report keep every other measurement.
 
-## Results
+The disk test writes a temporary file of up to about 1 GiB under `%LOCALAPPDATA%\OnDemandPerf\TestData` and deletes it
+afterwards, including when a run is cancelled or killed. It needs at least 2 GiB of free space and is skipped otherwise.
+
+## Results and privacy
 
 Default location: `%LOCALAPPDATA%\OnDemandPerf`.
 
@@ -39,8 +52,9 @@ Default location: `%LOCALAPPDATA%\OnDemandPerf`.
 - `Results/`: up to 50 historical JSON/text pairs
 - `OnDemandPerf.log`: rotates at 2 MiB, retaining one backup
 
-Results include the computer name and CPU information and stay local. Review collection/output permissions before production
-deployment. Field-level detail is in [docs/schema.md](docs/schema.md).
+Reports include the computer name, Windows version and the hardware identity above. They are written only to this folder:
+nothing is uploaded and the app makes no network connections. Serial numbers are deliberately not collected. Field-level
+detail is in [docs/schema.md](docs/schema.md).
 
 ## Command line
 
@@ -61,17 +75,18 @@ Exit codes: `0` success; `1` component failure, incomplete stage or cancellation
 `3` another worker is running (including one owned by another account). Ctrl+C cancels a console run, and a controlling
 process can send a `cancel` line to redirected standard input (closing standard input does not cancel). The worker stops
 work at 55 seconds to reserve cleanup/report time: each stage ends early enough to keep its completed measurements, and a run
-that reaches the deadline is `Partial`, not `Cancelled`. The tray terminates the process at 60 seconds. A stalled operating-system I/O request can delay
-cancellation or termination, so external management should also enforce a process deadline.
+that reaches the deadline is `Partial`, not `Cancelled`. The tray terminates the process at 60 seconds. A stalled
+operating-system I/O request can delay cancellation or termination, so scripts that run the worker should also enforce their
+own process deadline.
 
-A machine-wide named mutex prevents overlapping worker executions; inability to access another identity's lock fails closed.
-Cross-account/SYSTEM execution still requires deployment testing.
+A machine-wide named mutex prevents overlapping worker executions; if another account holds the lock, the worker refuses to
+run rather than overlap with it.
 
 ## Start at sign-in
 
-After building, run `pwsh -File scripts/Set-Startup.ps1` to register this build for **your user account**; add `-Disable` to
-remove it. The registration references the current artifacts folder, so moving it requires registering the new path. Neither
-building nor the tests register startup. Fleet-wide registration belongs in a future managed installer.
+After building, run `pwsh -File scripts/Set-Startup.ps1` to start this build at sign-in for **your user account**; add
+`-Disable` to remove it. The registration points at the current artifacts folder, so moving the folder means registering the
+new path. Neither building nor the tests register startup.
 
 ## Development
 
@@ -83,7 +98,7 @@ pwsh -File scripts/Test-FullAnalysis.ps1     # real CPU/RAM/disk run, write caps
 ```
 
 The two hardware scripts delete their output under `artifacts` on success (pass `-Keep` to retain it) and stop the tray
-instance they launch; close any running prototype before running them.
+instance they launch; close any running copy of the app before running them.
 
 - `src/OnDemandPerf`: Windows Forms tray and panel
 - `src/OnDemandPerf.Worker`: CLI entry point, process lifetime, cancellation
@@ -99,17 +114,20 @@ The app version lives only in `Directory.Build.props`. Regenerate the icon with 
 non-exportable current-user code-signing certificate; signatures are untimestamped and Windows may report them as untrusted.
 **Self-signing does not unblock Smart App Control**, which needs a certificate from a trusted provider
 ([requirements](https://learn.microsoft.com/en-us/windows/apps/develop/smart-app-control/code-signing-for-smart-app-control)).
+If Smart App Control or SmartScreen blocks your own unsigned build, that is why.
 
-## Prototype limits
+## Limitations
 
-This is a framework-dependent build requiring the .NET 10 Desktop Runtime; keep the whole `artifacts/OnDemandPerf` folder
-together. It is not a signed or self-contained production package.
+- Developed and tested on Windows 11 (x64, Intel hybrid CPU, NVMe SSD). Windows 10, ARM64, AMD, laptops, virtual machines,
+  RAID/Storage Spaces and USB drives have had little or no testing; reports of how it behaves there are welcome.
+- It needs the .NET 10 Desktop Runtime and ships as a folder (keep `artifacts/OnDemandPerf` together): there is no installer,
+  self-contained build or signed release yet.
+- Numbers are a quick screen, not a lab benchmark. Fixed inputs make runs repeatable, but background activity, power plan,
+  battery, thermals, the .NET version and hardware configuration all affect results. Compare runs from the same machine, or
+  machines of the same model, and read [docs/methodology.md](docs/methodology.md) before drawing conclusions.
+- Not yet implemented: PCIe link speed, CPU frequency/thermal sampling, and comparison against previous runs or a baseline.
+- Running the worker as another account or as SYSTEM has not been tested.
 
-Not yet implemented: serial numbers (deliberately omitted), PCIe link speed, CPU frequency/thermal sampling, comparison
-against previous runs or a baseline, and a managed installer. Fixed inputs improve repeatability, but background activity, power
-policy, thermals, runtime updates and hardware configuration still affect results; fleet comparisons need broader validation.
-Interactive window and tray-menu behavior needs human acceptance testing.
+## License
 
-Before broad deployment: complete inventory capture, validate multiple Windows versions and processor configurations, choose
-runtime servicing and installation policy, sign releases, validate user/SYSTEM permissions, and pilot a staged rollout with
-rollback.
+[MIT](LICENSE): free to use, modify and redistribute, including commercially. Provided as is, without warranty.

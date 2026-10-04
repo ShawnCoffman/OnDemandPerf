@@ -4,6 +4,9 @@
 
 Result schema and benchmark profiles are unchanged; scores stay comparable with 0.7.0.
 
+### Added
+- MIT license. README rewritten for outside readers (what it is, getting started, privacy, limitations).
+
 ### Fixed
 - A run that reaches the 55-second work deadline is no longer reported as "Test cancelled". User cancellation and the deadline
   are tracked separately; each stage also stops one second before the deadline (the disk random-read window shortens to fit),
