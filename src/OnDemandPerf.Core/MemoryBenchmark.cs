@@ -12,9 +12,15 @@ public static class MemoryBenchmark
     internal const int PassesPerOperation = 3;
     internal const int MultiPassMilliseconds = 400;
     internal const int MaxMultiWorkers = 8;
-    internal const int MaxBufferBytes = 256 * 1024 * 1024;
-    internal const int MinBufferBytes = 32 * 1024 * 1024;
-    public static string Profile { get; } = ProfileHash.Compute("memory-v3", MaxBufferBytes, MinBufferBytes, PassMilliseconds,
+    /// <summary>
+    /// Each of the two buffers. Fixed, so results compare across machines: at least twice the largest consumer CPU cache
+    /// (128 MB), where a buffer that shrank on low-memory machines could fit in cache and look faster than RAM.
+    /// </summary>
+    internal const int BufferBytes = 256 * 1024 * 1024;
+    /// <summary>Available RAM that must remain beyond the buffers, so the test does not push the PC into paging.</summary>
+    internal const long HeadroomBytes = 1024L * 1024 * 1024;
+    internal const long RequiredAvailableBytes = 2L * BufferBytes + HeadroomBytes;
+    public static string Profile { get; } = ProfileHash.Compute("memory-v4", BufferBytes, PassMilliseconds,
         PassesPerOperation, MultiPassMilliseconds, MaxMultiWorkers, MemoryLatencyBenchmark.Profile);
 
     /// <param name="token">User cancellation only; time limits come from the budget and <paramref name="available"/>.</param>
@@ -29,38 +35,47 @@ public static class MemoryBenchmark
         {
             var status = new WindowsNative.MemoryStatus { Length = (uint)Marshal.SizeOf<WindowsNative.MemoryStatus>() };
             if (!WindowsNative.GlobalMemoryStatusEx(ref status)) throw new InvalidOperationException("Available RAM unavailable.");
-            // Two buffers together use at most one eighth of currently available RAM, capped at 512 MiB.
-            int size = MaxBufferBytes;
-            while ((ulong)size * 16 > status.AvailablePhysical && size >= MinBufferBytes) size /= 2;
-            if (size < MinBufferBytes) { result.Status = "Skipped"; result.Notes.Add("Insufficient available RAM for a low-pressure test."); return result; }
-            byte[] source, destination;
-            while (true)
+            const int size = BufferBytes;
+            if (status.AvailablePhysical < RequiredAvailableBytes)
             {
-                try { source = new byte[size]; destination = new byte[size]; break; }
-                catch (OutOfMemoryException) when (size > MinBufferBytes) { size /= 2; }
+                result.Status = "Skipped";
+                result.Notes.Add(FormattableString.Invariant($"Only {status.AvailablePhysical / 1073741824d:F1} GiB of RAM was available; the RAM test needs {RequiredAvailableBytes / 1073741824d:F1} GiB free so it does not push the PC into paging. Close programs and run the test again."));
+                return result;
+            }
+            byte[] source, destination;
+            try { source = new byte[size]; destination = new byte[size]; }
+            catch (OutOfMemoryException)
+            {
+                result.Status = "Skipped";
+                result.Notes.Add("The RAM test could not allocate its two 256 MiB buffers; the PC is short of memory.");
+                return result;
             }
             result.BufferBytes = size;
-            result.Notes.Add("Compare matching buffer sizes; reduced buffers and large CPU caches can influence throughput.");
             source.AsSpan().Fill(0x5A);
             destination.AsSpan().Fill(0x5A); // Commit pages outside measurement.
-            foreach (string operation in new[] { "Copy", "Read", "Write" })
+            // A single worker on an efficiency core measures that core, not the memory, so steer it like the CPU test.
+            using (var placement = CoreSelection.PreferFastest())
             {
-                progress($"RAM {operation.ToLowerInvariant()}: warmup and {PassesPerOperation} passes...");
-                Perform(operation, source, destination, budget.Token);
-                for (int pass = 1; pass <= PassesPerOperation; pass++)
+                foreach (string operation in new[] { "Copy", "Read", "Write" })
                 {
-                    long bytes = 0;
-                    var watch = Stopwatch.StartNew();
-                    do { Perform(operation, source, destination, budget.Token); bytes += size; }
-                    while (watch.ElapsedMilliseconds < PassMilliseconds);
-                    watch.Stop();
-                    budget.Token.ThrowIfCancellationRequested();
-                    bool verified = operation == "Read" || (operation == "Write"
-                        ? destination.AsSpan().IndexOfAnyExcept((byte)0xA5) < 0 : destination.AsSpan().SequenceEqual(source));
-                    if (!verified) throw new InvalidDataException("RAM output verification failed.");
-                    result.Passes.Add(new(operation, pass, bytes, watch.Elapsed.TotalSeconds,
-                        bytes / watch.Elapsed.TotalSeconds / 1_000_000_000d, true));
+                    progress($"RAM {operation.ToLowerInvariant()}: warmup and {PassesPerOperation} passes...");
+                    Perform(operation, source, destination, budget.Token);
+                    for (int pass = 1; pass <= PassesPerOperation; pass++)
+                    {
+                        long bytes = 0;
+                        var watch = Stopwatch.StartNew();
+                        do { Perform(operation, source, destination, budget.Token); bytes += size; placement.Sample(); }
+                        while (watch.ElapsedMilliseconds < PassMilliseconds);
+                        watch.Stop();
+                        budget.Token.ThrowIfCancellationRequested();
+                        bool verified = operation == "Read" || (operation == "Write"
+                            ? destination.AsSpan().IndexOfAnyExcept((byte)0xA5) < 0 : destination.AsSpan().SequenceEqual(source));
+                        if (!verified) throw new InvalidDataException("RAM output verification failed.");
+                        result.Passes.Add(new(operation, pass, bytes, watch.Elapsed.TotalSeconds,
+                            bytes / watch.Elapsed.TotalSeconds / 1_000_000_000d, true));
+                    }
                 }
+                (result.CorePlacement, result.OnFastestCoresPercent) = (placement.Description, placement.OnFastestPercent);
             }
             RecordRates(result, ["Copy", "Read", "Write"]);
             result.CopyGBps = Rate(result, "Copy"); result.ReadGBps = Rate(result, "Read"); result.WriteGBps = Rate(result, "Write");

@@ -22,7 +22,7 @@ AnalysisResult Sample()
     for (int pass = 1; pass <= 3; pass++)
     {
         single.Passes.Add(new CpuPass(pass, 100_000_000, 1.8, 55.5) { ParticipatingWorkers = 1, WorkerBytesProcessed = [100_000_000], OutputVerified = true });
-        multi.Passes.Add(new CpuPass(pass, 4_000_000_000, 3.0, 1333.3) { ParticipatingWorkers = 8, WorkerBytesProcessed = new long[8], OutputVerified = true });
+        multi.Passes.Add(new CpuPass(pass, 4_000_000_000, 3.0, 1333.3) { ParticipatingWorkers = 8, WorkerBytesProcessed = new long[8], AverageBusyLogicalProcessors = 7.8, OutputVerified = true });
     }
     var memory = new MemoryResult
     {
@@ -129,7 +129,7 @@ Test("Result survives a JSON round trip with records and init-only lists", () =>
         original.Warnings.Add("something optional failed");
         File.WriteAllText(path, JsonSerializer.Serialize(original, ResultStore.JsonOptions));
         var loaded = ResultStore.Load(path);
-        Check(loaded.RunId == original.RunId && loaded.SchemaVersion == "2.1", "identity");
+        Check(loaded.RunId == original.RunId && loaded.SchemaVersion == "2.2", "identity");
         Check(loaded.Device?.ComputerName == "PC1" && loaded.Device.PhysicalCores == 4, "device record");
         Near(loaded.Cpu!.MultiThread!.MBps, 1588.6, 1e-9, "multithread MB/s");
         Check(loaded.Cpu.MultiThread.Passes.Count == 3 && loaded.Cpu.MultiThread.Passes[0].WorkerBytesProcessed.Length == 8, "cpu passes");
@@ -172,15 +172,18 @@ Test("ResultStore keeps 50 history pairs, returns the saved path, and can write 
 Test("ResultSummary cards for a complete result", () =>
 {
     var r = Sample();
-    Check(ResultSummary.CpuCard(r) == new CardValue("success", "1,588.6", "Multi · MB/s"), "cpu card");
-    Check(ResultSummary.RamCard(r).Value == "5.9", "ram card");
-    var disk = ResultSummary.DiskCard(r);
-    Check(disk.State == "success" && disk.Value == "1,800.5", "disk card must prefer the first full pass, got " + disk.Value);
+    Check(ResultSummary.CpuCard(r) == new CardValue("success", "96.5", "Single · MB/s"), "cpu card shows single-thread");
+    Check(ResultSummary.RamCard(r) == new CardValue("success", "60.1", "Multi read · GB/s"), "ram card shows multithread read");
+    Check(ResultSummary.DiskCard(r) == new CardValue("success", "14,516", "4K random · IOPS"), "disk card shows 4K random-read IOPS");
+    r.Memory!.MultiThreadReadGBps = null;
+    Check(ResultSummary.RamCard(r) == new CardValue("success", "11.2", "Read · GB/s"), "ram card falls back to single-worker read");
 });
 Test("ResultSummary reports incomplete stages instead of scores", () =>
 {
     var r = Sample();
     r.Cpu!.Status = "TimedOut"; r.Cpu.MultiThread = null;
+    Check(ResultSummary.CpuCard(r).Value == "96.5", "a completed single-thread stage still shows when multithread timed out");
+    r.Cpu.SingleThread = null;
     r.Memory = null;
     r.Disk!.Status = "Cancelled";
     Check(ResultSummary.CpuCard(r) == new CardValue("partial", "—", "TimedOut"), "timed-out cpu");
@@ -204,11 +207,11 @@ Test("ResultSummary headline and lines", () =>
 Test("ResultSummary notification names only the stages that produced a score", () =>
 {
     var r = Sample();
-    Check(ResultSummary.Notification(r) == "Test complete. CPU 1,588.6 MB/s · RAM 5.9 GB/s · Disk 1,800.5 MB/s", ResultSummary.Notification(r));
+    Check(ResultSummary.Notification(r) == "Test complete. CPU 96.5 MB/s · RAM 60.1 GB/s · Disk 14,516 IOPS", ResultSummary.Notification(r));
     r.Status = "Partial"; r.Disk!.Status = "TimedOut"; r.Memory = null;
     string partial = ResultSummary.Notification(r);
     Check(partial.StartsWith("Test complete — review incomplete tests. CPU") && !partial.Contains("RAM") && !partial.Contains('—' + " MB/s"), partial);
-    r.Status = "Failed"; r.Cpu = null; r.Disk = null;
+    r.Status = "Failed"; r.Cpu = null; r.Disk = null; r.Memory = null;
     Check(ResultSummary.Notification(r) == "Test failed", "no scores, headline only");
 });
 Test("StageBudget uses the sooner of the stage budget and the time left in the run", () =>
@@ -222,7 +225,9 @@ Test("TextReportWriter handles full and mostly empty results", () =>
 {
     string full = TextReportWriter.Format(Sample());
     Check(full.Contains("Memory Read, 8 workers") && full.Contains("First full pass of test file"), "new lines present");
-    Check(full.Contains("CPU benchmark profile: deflate-v3 / " + CpuBenchmark.Profile), "profile line");
+    Check(full.Contains("CPU benchmark profile: deflate-v4 / " + CpuBenchmark.Profile), "profile line");
+    Check(full.StartsWith("ONDEMAND PERF — SUMMARY") && full.Contains("Findings: none") && full.Contains("DETAILS"), "summary first");
+    Check(full.Contains("Validity: Valid") && !full.Contains("Battery charge") && !full.Contains("Manufacturer:"), "trimmed lines");
     string empty = TextReportWriter.Format(new AnalysisResult { Status = "Failed" });
     Check(empty.Contains("Status: Failed"), "empty result");
 });
@@ -447,8 +452,190 @@ Test("Hardware identity survives the JSON round trip and reaches the report", ()
     var loaded = JsonSerializer.Deserialize<AnalysisResult>(json, ResultStore.JsonOptions)!;
     Check(loaded.Device!.InstalledMemory!.Modules.Count == 2 && loaded.Device.TestDrive!.NvmeVersion == "1.4" && loaded.Device.CpuBaseMhz == 1700, "round trip");
     string report = TextReportWriter.Format(loaded);
-    Check(report.Contains("HARDWARE") && report.Contains("RAM module DIMM A") && report.Contains("Hardware note"), "report sections");
-    Check(ResultSummary.Lines(loaded).Any(l => l.StartsWith("Note — ")), "hints in summary");
+    Check(report.Contains("HARDWARE") && report.Contains("RAM module DIMM A"), "report sections");
+    Check(ResultSummary.Lines(loaded).Any(l => l.StartsWith("Note — ")), "results without findings still show hardware hints");
+    FindingRules.Apply(loaded);
+    Check(loaded.Findings.Any(f => f.Area == "RAM" && f.Message.StartsWith("Running at 4800")), "hardware hints become findings with their area");
+    Check(TextReportWriter.Format(loaded).Contains("- RAM: Running at 4800"), "findings reach the report");
+    Check(ResultSummary.Lines(loaded)[0] == "FINDINGS" && !ResultSummary.Lines(loaded).Any(l => l.StartsWith("Note — ")), "findings replace hints in the summary");
+});
+
+// ---- support-test changes: power validity, findings, core steering, fixed sizes ----
+Test("Power plans and power modes are named from their GUIDs", () =>
+{
+    Check(PowerPolicy.PlanType(new Guid("381b4222-f694-41f0-9685-ff5bb260df2e")) == "Balanced", "balanced");
+    Check(PowerPolicy.PlanType(new Guid("8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c")) == "HighPerformance", "high");
+    Check(PowerPolicy.PlanType(new Guid("a1841308-3541-4fab-bc81-f71556f20b4a")) == "PowerSaver", "saver");
+    Check(PowerPolicy.PlanType(Guid.NewGuid()) == "Custom", "custom");
+    Check(PowerPolicy.PowerMode(Guid.Empty) == "Balanced", "no overlay is balanced");
+    Check(PowerPolicy.PowerMode(new Guid("961cc777-2547-4f9d-8174-7d86181b8a7a")) == "BestPowerEfficiency", "efficiency");
+    Check(PowerPolicy.PowerMode(new Guid("ded574b5-45a0-4f42-8737-46345c09c238")) == "BestPerformance", "performance");
+});
+
+AnalysisResult Conditions(Action<TestEnvironment> change)
+{
+    var r = Sample();
+    r.Environment = new TestEnvironment
+    {
+        PowerSource = "AC", PowerPlan = "Balanced", PowerPlanType = "Balanced", PowerMode = "Balanced", EnergySaverOn = false,
+        MaxProcessorStatePercent = 100, ProcessorBoostMode = 2, UptimeDays = 1, PendingRestart = [],
+        TotalPhysicalBytes = 32UL << 30, AvailablePhysicalBytes = 20UL << 30, CommitBytes = 20UL << 30, CommitLimitBytes = 40UL << 30,
+        SystemDrive = @"C:\", SystemDriveFreeBytes = 200UL << 30, SystemDriveTotalBytes = 1000UL << 30, CpuUtilizationPercent = 3
+    };
+    change(r.Environment);
+    FindingRules.Apply(r);
+    return r;
+}
+
+Test("A healthy run has no findings and is valid", () =>
+{
+    var r = Conditions(_ => { });
+    Check(r.Findings.Count == 0 && r.Validity == "Valid", string.Join(" | ", r.Findings));
+});
+Test("Power-saving plans, modes and energy saver make the run invalid", () =>
+{
+    Check(Conditions(e => { e.PowerPlanType = "PowerSaver"; e.PowerPlan = "Power saver"; }).Validity == "Invalid", "power saver plan");
+    Check(Conditions(e => { e.PowerPlanType = "Custom"; e.PowerPlan = "Contoso Battery Saver"; }).Validity == "Invalid", "custom plan named saver");
+    Check(Conditions(e => e.PowerMode = "BestPowerEfficiency").Validity == "Invalid", "best power efficiency on Balanced");
+    Check(Conditions(e => e.EnergySaverOn = true).Validity == "Invalid", "energy saver");
+    // Windows ignores the power mode on High performance, so a stale overlay must not invalidate it.
+    Check(Conditions(e => { e.PowerPlanType = "HighPerformance"; e.PowerMode = "BestPowerEfficiency"; }).Validity == "Valid", "overlay ignored");
+    Check(Conditions(e => e.PowerPlanType = "UltimatePerformance").Validity == "Valid", "ultimate");
+    var custom = Conditions(e => { e.PowerPlanType = "Custom"; e.PowerPlan = "Company standard"; });
+    Check(custom.Validity == "Valid" && custom.Findings.Single().Area == "Power", "unknown custom plan is a warning");
+    Check(Conditions(e => { e.PowerPlanType = "Custom"; e.PowerPlan = "Ultimate Performance"; }).Findings.Count == 0, "duplicated Ultimate plan");
+});
+Test("Battery is shown but does not invalidate; invalid findings come first", () =>
+{
+    var r = Conditions(e => { e.PowerSource = "Battery"; e.BatteryChargePercent = 64; });
+    Check(r.Validity == "Valid" && r.Findings.Single().Message.StartsWith("Running on battery (64% charged)"), "battery warning");
+    Check(ResultSummary.Headline(r) == "Test complete — on battery power", ResultSummary.Headline(r));
+    var both = Conditions(e => { e.PowerSource = "Battery"; e.EnergySaverOn = true; });
+    Check(both.Findings[0].Severity == "Invalid" && ResultSummary.Headline(both) == "Test not valid — power saving was on", "invalid first");
+    Check(ResultSummary.FindingLines(both)[0].StartsWith("NOT VALID — Power: Energy saver"), ResultSummary.FindingLines(both)[0]);
+    Check(TextReportWriter.Format(both).Contains("Validity: NOT VALID"), "report validity");
+    var unplugged = Conditions(_ => { });
+    unplugged.Activity = new ActivityResult();
+    unplugged.Activity.Samples.Add(new ActivitySample(1, 1, "Disk", 10, null, "Battery"));
+    FindingRules.Apply(unplugged);
+    Check(unplugged.Findings.Single().Message.Contains("unplugged"), "unplugged during the test");
+});
+Test("Slowness findings: background load, clock, memory, disk space, restarts, plan limits", () =>
+{
+    string Areas(AnalysisResult r) => string.Join(",", r.Findings.Select(f => f.Area));
+    var busy = Conditions(e => { e.CpuUtilizationPercent = 45; e.TopProcesses.Add(new ProcessCpu("MsMpEng.exe", 4000, 31.2)); });
+    Check(busy.Findings.Single().Message.Contains("45% busy") && busy.Findings[0].Message.Contains("MsMpEng.exe 31%"), busy.Findings[0].Message);
+    var hot = Conditions(_ => { });
+    hot.Device!.CpuBaseMhz = 2000;
+    hot.Activity = new ActivityResult();
+    foreach (double clock in new[] { 60.0, 64.0, 62.0 })
+        hot.Activity.Samples.Add(new ActivitySample(1, 1, "CPU", 99, null, "AC") { ProcessorPerformancePercent = clock });
+    hot.Activity.Samples.Add(new ActivitySample(1, 1, "CPU", 20, null, "AC") { ProcessorPerformancePercent = 10 }); // not under load
+    FindingRules.Apply(hot);
+    Check(hot.Findings.Single().Message.Contains("about 62% of its base clock (about 1.2 GHz against a 2.0 GHz base)"), hot.Findings.Single().Message);
+    Check(Areas(Conditions(e => e.AvailablePhysicalBytes = 512UL << 20)) == "RAM", "low free RAM");
+    Check(Areas(Conditions(e => { e.TotalPhysicalBytes = 4UL << 30; e.AvailablePhysicalBytes = 2UL << 30; })) == "RAM", "small RAM");
+    Check(Areas(Conditions(e => e.CommitBytes = 38UL << 30)) == "RAM", "commit near limit");
+    Check(Areas(Conditions(e => e.SystemDriveFreeBytes = 8UL << 30)) == "Disk", "low drive space");
+    Check(Areas(Conditions(e => { e.UptimeDays = 12; e.PendingRestart = ["Windows Update"]; })) == "System,System", "uptime and restart");
+    Check(Areas(Conditions(e => { e.MaxProcessorStatePercent = 70; e.ProcessorBoostMode = 0; })) == "Power,Power", "plan CPU limits");
+    var reduced = Conditions(_ => { });
+    reduced.Disk!.ReducedForFreeSpace = true; reduced.Disk.FileLimitBytes = 300L << 20;
+    FindingRules.Apply(reduced);
+    Check(reduced.Findings.Single().Message.Contains("300 MiB"), "reduced disk file");
+    var parked = Conditions(_ => { });
+    parked.Cpu!.SingleThread!.OnFastestCoresPercent = 40;
+    FindingRules.Apply(parked);
+    Check(parked.Findings.Single().Message.Contains("fastest cores only 40%"), "single thread off the fastest cores");
+});
+Test("Ticket summary is short, culture-independent and complete", () =>
+{
+    var original = CultureInfo.CurrentCulture;
+    try
+    {
+        CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("de-DE");
+        var r = Conditions(e => { e.PowerSource = "Battery"; e.BatteryChargePercent = 64; });
+        r.Device!.CpuBaseMhz = 3200;
+        var lines = ResultSummary.TicketSummary(r);
+        Check(lines.Count <= 14, "fits in a ticket: " + lines.Count);
+        Check(lines[1] == "Result: Test complete — on battery power", lines[1]);
+        Check(lines.Contains("Power: Battery (64%) · plan Balanced · mode Balanced"), "power line");
+        Check(lines.Contains("Scores: CPU single-thread 96.5 MB/s · RAM multithread read 60.1 GB/s · Disk 4K random read 14,516 IOPS"), "scores");
+        Check(lines.Any(l => l.StartsWith("Also: CPU multithread 1,588.6 MB/s · RAM latency 100.2 ns · Disk sequential read 1,800 MB/s")), "secondary");
+        Check(lines.Contains("Findings (1):") && lines[^1].StartsWith("- Power: Running on battery"), "findings");
+        var invalid = Conditions(e => e.EnergySaverOn = true);
+        Check(ResultSummary.TicketSummary(invalid)[1].Contains("NOT VALID"), "invalid is unmissable");
+        var empty = ResultSummary.TicketSummary(new AnalysisResult { Status = "Failed" });
+        Check(empty.Any(l => l.Contains("CPU single-thread not completed")) && empty[^1] == "Findings: none", "empty result");
+    }
+    finally { CultureInfo.CurrentCulture = original; }
+});
+Test("Busy-process lines appear in the report only when the PC was busy", () =>
+{
+    var quiet = Conditions(e => e.TopProcesses.Add(new ProcessCpu("idle-ish.exe", 1, 0.7)));
+    Check(!TextReportWriter.Format(quiet).Contains("Busy before test"), "quiet PC");
+    var busy = Conditions(e => { e.CpuUtilizationPercent = 40; e.TopProcesses.Add(new ProcessCpu("scan.exe", 1, 30)); });
+    Check(TextReportWriter.Format(busy).Contains("Busy before test: scan.exe (PID 1) 30.0% of all CPUs"), "busy PC");
+});
+Test("Findings survive the JSON round trip", () =>
+{
+    var r = Conditions(e => e.EnergySaverOn = true);
+    var loaded = JsonSerializer.Deserialize<AnalysisResult>(JsonSerializer.Serialize(r, ResultStore.JsonOptions), ResultStore.JsonOptions)!;
+    Check(loaded.Validity == "Invalid" && loaded.Findings[0] == r.Findings[0], "findings and validity");
+});
+
+byte[] CpuSetRecord(uint id, byte logical, byte efficiencyClass, byte flags = 0)
+{
+    var record = new byte[32];
+    BitConverter.GetBytes(32u).CopyTo(record, 0);
+    BitConverter.GetBytes(id).CopyTo(record, 8);
+    record[14] = logical; record[18] = efficiencyClass; record[19] = flags;
+    return record;
+}
+Test("CPU set parser and fastest-core selection", () =>
+{
+    var buffer = Concat(CpuSetRecord(256, 0, 1), CpuSetRecord(257, 1, 1), CpuSetRecord(258, 2, 0), CpuSetRecord(259, 3, 1, flags: 2));
+    var sets = CoreSelection.Parse(buffer, buffer.Length);
+    Check(sets.Count == 4 && sets[2].EfficiencyClass == 0 && sets[3].Allocated, "parsed");
+    Check(CoreSelection.Fastest(sets, _ => true).SequenceEqual(new uint[] { 256, 257 }), "fastest, unreserved");
+    Check(CoreSelection.Fastest(sets, s => s.LogicalProcessor == 1).SequenceEqual(new uint[] { 257 }), "respects affinity");
+    Check(CoreSelection.Fastest(sets, s => s.LogicalProcessor == 2).Length == 0, "never steers to a slower class");
+    bool threw = false;
+    try { CoreSelection.Parse(new byte[12], 12); } catch (InvalidDataException) { threw = true; }
+    Check(threw, "truncated buffer is rejected");
+});
+Test("Process list parser and busiest-process ranking", () =>
+{
+    const long baseAddress = 0x10000;
+    byte[] Record(int id, long create, long cpu, string name)
+    {
+        var record = new byte[88 + name.Length * 2];
+        BitConverter.GetBytes(create).CopyTo(record, 32);
+        BitConverter.GetBytes(cpu).CopyTo(record, 40);
+        BitConverter.GetBytes((ushort)(name.Length * 2)).CopyTo(record, 56);
+        BitConverter.GetBytes((long)id).CopyTo(record, 80);
+        System.Text.Encoding.Unicode.GetBytes(name).CopyTo(record, 88);
+        return record;
+    }
+    var first = Record(0, 0, 999, "");
+    BitConverter.GetBytes((uint)first.Length).CopyTo(first, 0); // next-entry offset
+    var second = Record(1234, 77, 5_000_000, "scan.exe");
+    BitConverter.GetBytes(baseAddress + first.Length + 88).CopyTo(second, 64); // the name lives in the same buffer
+    var entries = ProcessActivity.Parse(Concat(first, second), baseAddress);
+    Check(entries.Count == 2 && entries[0].Name == "Idle" && entries[1].Name == "scan.exe" && entries[1].CpuTicks == 5_000_000, "parsed");
+    var before = new[] { new ProcessActivity.Entry(1234, 77, "scan.exe", 1_000_000), new ProcessActivity.Entry(50, 1, "self", 0) };
+    var after = new[] { new ProcessActivity.Entry(1234, 77, "scan.exe", 9_000_000), new ProcessActivity.Entry(50, 1, "self", 9_000_000),
+        new ProcessActivity.Entry(0, 0, "Idle", 99_000_000), new ProcessActivity.Entry(77, 5, "new.exe", 2_000_000) };
+    var top = ProcessActivity.Top(before, after, 2, 4, 5, excludeProcessId: 50);
+    Check(top.Count == 2 && top[0] == new ProcessCpu("scan.exe", 1234, 10.0) && top[1].Name == "new.exe" && top[1].CpuPercent == 2.5,
+        string.Join(", ", top));
+});
+Test("RAM buffers are fixed and the disk test file shrinks to fit free space", () =>
+{
+    Check(MemoryBenchmark.BufferBytes == 256 * 1024 * 1024 && MemoryBenchmark.RequiredAvailableBytes == 1536L * 1024 * 1024, "ram sizes");
+    Check(DiskBenchmark.FileLimit(100L << 30) == 1L << 30, "plenty of space: 1 GiB");
+    Check(DiskBenchmark.FileLimit((512L + 300) << 20) == 300L << 20, "low space: what is left after the reserve");
+    Check(DiskBenchmark.FileLimit((512L + 63) << 20) == 0, "too little space to test");
 });
 
 Console.WriteLine($"\n{passed} passed, {failed} failed.");

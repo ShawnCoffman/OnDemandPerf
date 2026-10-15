@@ -5,9 +5,10 @@ namespace OnDemandPerf;
 
 internal sealed class TestWindow : Form
 {
-    private readonly Button run = new PerfButton { Text = "Run Perf Test", Primary = true };
-    private readonly Button cancel = new PerfButton { Text = "Cancel", Width = 80, Enabled = false };
-    private readonly Button results = new PerfButton { Text = "Open Results", Width = 140 };
+    private readonly Button run = new PerfButton { Text = "Run Perf Test", Primary = true, Width = 116 };
+    private readonly Button cancel = new PerfButton { Text = "Cancel", Width = 72, Enabled = false };
+    private readonly Button results = new PerfButton { Text = "Open Results", Width = 112 };
+    private readonly Button copy = new PerfButton { Text = "Copy Summary", Width = 112, AccessibleDescription = "Copies a short summary for a support ticket" };
     private readonly Label status = new() { Text = "Ready to test", Dock = DockStyle.Fill, AutoEllipsis = true };
     private readonly Label elapsed = new() { Text = "CPU, RAM and disk · about 50 seconds", Dock = DockStyle.Fill };
     private readonly SegmentedActivity progress = new() { Dock = DockStyle.Fill };
@@ -31,6 +32,8 @@ internal sealed class TestWindow : Form
     private Task? runningTask;
     private bool cancelling;
     private string? reportPath;
+    /// <summary>The result shown after this session's last run; Copy Summary falls back to Latest.json before the first run.</summary>
+    private AnalysisResult? lastResult;
     private string? outcome;
     private WorkerJob? job;
     private Screen? placementScreen;
@@ -89,7 +92,7 @@ internal sealed class TestWindow : Form
             cards.Controls.Add(card);
         }
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = Padding.Empty };
-        buttons.Controls.AddRange([run, cancel, results]);
+        buttons.Controls.AddRange([run, cancel, results, copy]);
         status.Font = new Font("Segoe UI", 11, FontStyle.Bold);
         status.TextAlign = ContentAlignment.MiddleLeft;
         elapsed.ForeColor = PerfTheme.Muted;
@@ -109,6 +112,8 @@ internal sealed class TestWindow : Form
         Controls.Add(layout);
         output.Text = "Run one performance test to check CPU, RAM and disk.\r\n\r\nEach operation will appear here as it runs.";
         results.Enabled = File.Exists(Path.Combine(ResultStore.DefaultDirectory, "Latest.txt"));
+        copy.Enabled = File.Exists(LatestJson);
+        copy.Click += (_, _) => CopySummary();
         run.Click += async (_, _) => await RunAsync();
         cancel.Click += async (_, _) => await StopAsync();
         results.Click += (_, _) => TrayContext.OpenResults(true);
@@ -158,9 +163,15 @@ internal sealed class TestWindow : Form
             systemValues[i].Text = lines[i].Text;
             tips.SetToolTip(systemValues[i], lines[i].Text); // full text when the line is ellipsized
         }
-        var hints = HardwareSummary.Hints(device);
-        systemHint.Text = hints.Count == 0 ? "" : "⚠ " + hints[0] + (hints.Count > 1 ? $" (+{hints.Count - 1} more)" : "");
-        tips.SetToolTip(systemHint, string.Join(Environment.NewLine, hints));
+        ShowAlerts(HardwareSummary.Hints(device), false);
+    }
+
+    /// <summary>The line under the machine identity: the most serious alert, the rest in its tooltip and the results text.</summary>
+    private void ShowAlerts(IReadOnlyList<string> alerts, bool invalid)
+    {
+        systemHint.ForeColor = invalid ? PerfTheme.Red : PerfTheme.Amber;
+        systemHint.Text = alerts.Count == 0 ? "" : (invalid ? "✖ " : "⚠ ") + alerts[0] + (alerts.Count > 1 ? $" (+{alerts.Count - 1} more)" : "");
+        tips.SetToolTip(systemHint, string.Join(Environment.NewLine, alerts));
     }
 
     /// <summary>
@@ -225,9 +236,10 @@ internal sealed class TestWindow : Form
         cancelling = false;
         reportPath = null;
         outcome = null;
-        run.Enabled = results.Enabled = false;
+        run.Enabled = results.Enabled = copy.Enabled = false;
         cancel.Enabled = true;
         output.Clear();
+        status.ForeColor = PerfTheme.Text;
         foreach (var card in new[] { cpuCard, ramCard, diskCard }) card.UpdateState("waiting", "—", "Waiting" );
         clock.Restart();
         timer.Start();
@@ -297,22 +309,49 @@ internal sealed class TestWindow : Form
             if (activeCard is not null) { activeCard.UpdateState("partial", "—", cancelling ? "Cancelled" : "Incomplete"); activeCard = null; }
             IsRunning = false;
             run.Enabled = true; cancel.Enabled = false;
+            copy.Enabled = lastResult is not null || File.Exists(LatestJson);
             StateChanged?.Invoke(this, EventArgs.Empty);
             // A user who cancelled (or chose Exit) already knows; everyone else hears about every outcome, not just success.
             if (!cancelling) RunCompleted?.Invoke(this, outcome ?? status.Text);
         }
     }
 
+    private static string LatestJson => Path.Combine(ResultStore.DefaultDirectory, "Latest.json");
+
+    /// <summary>Puts the ticket summary on the clipboard and confirms on the button itself, leaving the headline alone.</summary>
+    private void CopySummary()
+    {
+        try
+        {
+            var report = lastResult ?? ResultStore.Load(LatestJson);
+            Clipboard.SetText(string.Join(Environment.NewLine, ResultSummary.TicketSummary(report)));
+            copy.Text = "Copied ✓";
+        }
+        catch (Exception ex) when (ex is IOException or System.Text.Json.JsonException or System.Runtime.InteropServices.ExternalException or UnauthorizedAccessException)
+        {
+            copy.Text = "Copy failed";
+            Append("Copy Summary: " + ex.Message);
+        }
+        var reset = new System.Windows.Forms.Timer { Interval = 2000 };
+        reset.Tick += (_, _) => { reset.Dispose(); if (!copy.IsDisposed) copy.Text = "Copy Summary"; };
+        reset.Start();
+    }
+
     private void ShowResult(AnalysisResult report)
     {
         activeCard = null;
+        lastResult = report;
         if (report.Device is not null) ShowSystem(report.Device);
+        // After a run the findings (power, background load, memory, disk space, restarts, hardware hints) replace the hints.
+        if (report.Findings.Count > 0) ShowAlerts(ResultSummary.FindingLines(report), report.Validity == "Invalid");
         var cpu = ResultSummary.CpuCard(report);
         var ram = ResultSummary.RamCard(report);
         var disk = ResultSummary.DiskCard(report);
         foreach (var (card, value) in new[] { (cpuCard, cpu), (ramCard, ram), (diskCard, disk) })
             card.UpdateState(value.State, value.Value, value.Caption);
         SetStatus(ResultSummary.Headline(report));
+        status.ForeColor = report.Validity == "Invalid" ? PerfTheme.Red
+            : report.Environment?.PowerSource == "Battery" ? PerfTheme.Amber : PerfTheme.Text;
         outcome = ResultSummary.Notification(report);
         var activity = output.Text;
         output.Text = string.Join(Environment.NewLine, ResultSummary.Lines(report)) + "\r\n\r\nActivity\r\n" + activity;

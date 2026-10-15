@@ -2,11 +2,15 @@ namespace OnDemandPerf.Core;
 
 public sealed class MemoryResult
 {
-    public string BenchmarkVersion { get; init; } = "memory-v3";
+    public string BenchmarkVersion { get; init; } = "memory-v4";
     public string ProfileHash { get; init; } = MemoryBenchmark.Profile;
     public string Status { get; set; } = "Success";
+    /// <summary>Fixed at 256 MiB each since memory-v4, so results compare across machines and never fit in a CPU cache.</summary>
     public int BufferBytes { get; set; }
     public int BufferCount { get; init; } = 2;
+    /// <summary>Single-worker bandwidth only: how the thread was steered and its share of samples on the fastest core type.</summary>
+    public string? CorePlacement { get; set; }
+    public double? OnFastestCoresPercent { get; set; }
     public string Method { get; init; } = "Single worker; vectorized read checksum, Span.Fill write, Span.CopyTo copy; logical payload GB/s (decimal), not total bus traffic";
     public List<MemoryPass> Passes { get; init; } = [];
     public MemoryLatencyResult? Latency { get; set; }
@@ -34,6 +38,10 @@ public sealed class DiskResult
     public string? Volume { get; set; }
     public string? FileSystem { get; set; }
     public long FreeBytesBefore { get; set; }
+    /// <summary>Largest test file allowed: 1 GiB, or less when free space is low (512 MiB is always left free).</summary>
+    public long FileLimitBytes { get; set; }
+    /// <summary>True when low free space forced a smaller test file; such results are not comparable with full-size runs.</summary>
+    public bool ReducedForFreeSpace { get; set; }
     public long FileBytes { get; set; }
     public long TotalBytesWritten { get; set; }
     public uint LogicalSectorBytes { get; set; }
@@ -59,7 +67,7 @@ public sealed record DiskMeasurement(string Operation, string Status, int BlockB
 
 public sealed class MemoryLatencyResult
 {
-    public string BenchmarkVersion { get; init; } = "dependent-access-v1";
+    public string BenchmarkVersion { get; init; } = "dependent-access-v2";
     public string ProfileHash { get; init; } = MemoryLatencyBenchmark.Profile;
     public string Status { get; set; } = "Incomplete";
     public string Method { get; init; } = "Single dependent index chain, seeded Sattolo permutation, 64-byte node spacing; managed bounds/loop overhead included; cache and scheduling affect results; not DRAM-only latency";
@@ -67,6 +75,8 @@ public sealed class MemoryLatencyResult
     public int NodeSpacingBytes { get; init; } = 64;
     public int Seed { get; init; } = 314159;
     public bool CycleVerified { get; set; }
+    public string? CorePlacement { get; set; }
+    public double? OnFastestCoresPercent { get; set; }
     public double? NanosecondsPerAccess { get; set; }
     public double? VariationPercent { get; set; }
     public double DurationSeconds { get; set; }

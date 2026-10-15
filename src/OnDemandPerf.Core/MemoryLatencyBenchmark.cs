@@ -8,11 +8,13 @@ public static class MemoryLatencyBenchmark
     internal const int PassCount = 3;
     internal const int PassMilliseconds = 1250;
     internal const int NodeStride = 16; // ints, i.e. 64 bytes
-    public static string Profile { get; } = ProfileHash.Compute("dependent-access-v1", PassCount, PassMilliseconds, NodeStride * 4);
+    public static string Profile { get; } = ProfileHash.Compute("dependent-access-v2", PassCount, PassMilliseconds, NodeStride * 4);
 
     public static void Run(byte[] buffer, MemoryLatencyResult result, CancellationToken token, Action<string> progress)
     {
         var total = Stopwatch.StartNew();
+        // One dependent chain is one thread; steer it to the fastest cores like the other single-worker measurements.
+        using var placement = CoreSelection.PreferFastest();
         try
         {
             progress("RAM latency: building and verifying a dependent random-access chain...");
@@ -53,12 +55,14 @@ public static class MemoryLatencyBenchmark
                     token.ThrowIfCancellationRequested();
                     for (int i = 0; i < 4096; i++) index = links[index];
                     accesses += 4096;
+                    placement.Sample();
                 } while (watch.ElapsedMilliseconds < PassMilliseconds);
                 watch.Stop();
                 token.ThrowIfCancellationRequested();
                 result.Passes.Add(new(pass, accesses, watch.Elapsed.TotalSeconds, watch.Elapsed.TotalNanoseconds / accesses));
             }
             GC.KeepAlive(index);
+            (result.CorePlacement, result.OnFastestCoresPercent) = (placement.Description, placement.OnFastestPercent);
             result.NanosecondsPerAccess = result.Passes.Sum(p => p.DurationSeconds) * 1e9 / result.Passes.Sum(p => p.Accesses);
             result.VariationPercent = Stats.VariationPercent(result.Passes.Select(p => p.NanosecondsPerAccess).ToArray());
             result.Status = "Success";

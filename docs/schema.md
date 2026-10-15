@@ -1,4 +1,4 @@
-# Result schema 2.1
+# Result schema 2.2
 
 JSON is camelCase. Memory is in bytes, utilization in percent, MB = 1,000,000 bytes, GB = 1,000,000,000 bytes. Unavailable
 values are `null`. `Latest.json` and every file in `Results/` use the same schema; `/compact` removes indentation only.
@@ -7,7 +7,7 @@ The typed model is `OnDemandPerf.Core.AnalysisResult`; the tray reads results th
 ## Top level
 
 `schemaVersion`, `applicationVersion` (from `Directory.Build.props`), `runId`, `timestamp`, `durationSeconds`, `status`
-(`Success`, `Partial`, `Cancelled`, `Failed`), `device`, `environment`, `cpu`, `memory`, `disk`, `activity`, `warnings`, `errors`.
+(`Success`, `Partial`, `Cancelled`, `Failed`), `validity` (`Valid`, `Invalid`), `findings`, `device`, `environment`, `cpu`, `memory`, `disk`, `activity`, `warnings`, `errors`.
 A stage that did not run is `null`. A successful run can carry warnings.
 
 ## Stage fields worth knowing
@@ -23,6 +23,24 @@ A stage that did not run is `null`. A successful run can carry warnings.
 - `environment.processPowerThrottling`: whether the worker opted out of Windows efficiency mode (`OptedOut`, `Failed: ...`).
 - `disk.measurements[]`: `SequentialWrite`, `SequentialRead`, `RandomWrite`, `RandomRead`, each with operations, bytes, duration,
   `mBps`, `iops`, mean and p95 latency, `shortBurst`, `stopReason`. `SequentialRead` also has `filePasses` and `firstPassMBps`.
+
+## Findings, power and conditions (2.2, additive)
+
+- `validity`: `Invalid` when the PC was in a power-saving plan, power mode or Energy saver. `status` is unchanged by it.
+- `findings[]`: `severity` (`Invalid` or `Warning`), `area` (`Power`, `CPU`, `RAM`, `Disk`, `System`), `message`. Invalid
+  first. Rules and thresholds are in [methodology](methodology.md#validity-and-findings).
+- `environment` gained, all nullable: `powerPlanType` (`Balanced`, `HighPerformance`, `UltimatePerformance`, `PowerSaver`,
+  `Custom`), `powerMode` (`Balanced`, `BestPerformance`, `BestPowerEfficiency`, `BatterySaver`, `Other {guid}`),
+  `energySaverOn`, `maxProcessorStatePercent`, `processorBoostMode` (0 = disabled), `uptimeDays`, `pendingRestart` (list of
+  reasons, empty when none), `commitBytes`, `commitLimitBytes`, `systemDrive`, `systemDriveFreeBytes`, `systemDriveTotalBytes`,
+  and `topProcesses[]` (`name`, `processId`, `cpuPercent` of the whole machine).
+- `activity.samples[]` gained `processorPerformancePercent` and `performanceLimitPercent`.
+- `cpu.singleThread`, its passes, `memory` and `memory.latency` gained `corePlacement` and `onFastestCoresPercent`.
+- `disk` gained `fileLimitBytes` and `reducedForFreeSpace`.
+- Profiles changed: `deflate-v4`, `memory-v4` (fixed 256 MiB buffers), `dependent-access-v2`. `disk-qd1-v3` is unchanged for full-size
+  runs.
+- `disk.notes` no longer repeats the method text or short-burst warnings on every run (see `cachePolicy`, `dataset`,
+  `shortBurst` and the methodology).
 
 ## Hardware identity (2.1, additive)
 

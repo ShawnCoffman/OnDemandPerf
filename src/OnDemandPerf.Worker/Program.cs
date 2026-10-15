@@ -6,7 +6,7 @@ namespace OnDemandPerf.Worker;
 internal static class Program
 {
     private const string Usage = "OnDemand Perf worker: /run | /inventory | /cpu | /memory | /disk [/output <directory>] [/diskpath <test directory>] [/compact]\n" +
-        "Exit codes: 0 success; 1 partial failure/cancelled; 2 fatal failure; 3 already running.\n" +
+        "Exit codes: 0 success; 1 partial failure/cancelled or not valid (power saving on); 2 fatal failure; 3 already running.\n" +
         "Send 'cancel' on standard input or press Ctrl+C to cancel. Lines starting with '##' are machine-readable progress for the tray.";
 
     private static int Main(string[] args)
@@ -124,6 +124,8 @@ internal static class Program
         catch (Exception ex) { result.Status = "Failed"; result.Errors.Add("Run: " + ex.Message); }
         activity.Dispose();
         result.Activity = activity.Result;
+        FindingRules.Apply(result);
+        foreach (var line in ResultSummary.FindingLines(result)) Console.WriteLine("Finding: " + line);
         timer.Stop();
         result.DurationSeconds = timer.Elapsed.TotalSeconds;
         string reportPath = store.Save(result);
@@ -135,10 +137,10 @@ internal static class Program
             store.Log($"INFO Disk ({disk.Status}): target {disk.TargetDirectory}; {disk.TotalBytesWritten} bytes written; cleanup {disk.CleanupSucceeded}");
             foreach (var note in disk.Notes) store.Log("INFO Disk: " + note);
         }
-        store.Log($"INFO Run {result.RunId} finished: {result.Status}; {string.Join("; ", result.Errors)}");
+        store.Log($"INFO Run {result.RunId} finished: {result.Status}, {result.Validity}; {string.Join("; ", result.Errors)}");
         // The tray reads exactly this file instead of guessing from Latest.json and timestamps.
         Console.WriteLine("##report " + reportPath);
-        Console.WriteLine($"{result.Status}. Results: {directory}");
-        return result.Status == "Success" ? 0 : 1;
+        Console.WriteLine($"{ResultSummary.Headline(result)}. Results: {directory}");
+        return result.Status == "Success" && result.Validity == "Valid" ? 0 : 1;
     }
 }

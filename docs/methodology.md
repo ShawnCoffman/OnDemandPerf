@@ -6,7 +6,9 @@ overall score, or a diagnosis. Compare results only when the benchmark version *
 parameters (durations, pass counts, sizes, seeds); it cannot see logic changes, so a change to a dataset or algorithm still
 needs a new version name. The runtime version, power state and hardware configuration are part of the comparison context.
 
-Current profiles: `deflate-v3`, `memory-v3` (includes `dependent-access-v1`), `disk-qd1-v3`.
+Current profiles: `deflate-v4`, `memory-v4` (includes `dependent-access-v2`), `disk-qd1-v3`. The v4/v2 profiles steer
+single-worker measurements to the fastest cores and fix the RAM buffer size, so they are not comparable with earlier versions.
+A disk run with `reducedForFreeSpace` is not comparable with full-size disk runs.
 
 ## Time budget
 
@@ -26,7 +28,7 @@ total measured time); the median pass is also recorded because it is less sensit
 provisional thresholds (more than 5% variation, more than 10% first-to-last decline). They suggest a retest; they are not
 calibrated fleet thresholds, confidence intervals, or proof of thermal throttling. Nothing extends a run automatically.
 
-## CPU (`deflate-v3`)
+## CPU (`deflate-v4`)
 
 Single-thread compression (three 1.8 s passes) followed by multithread compression (three 3 s passes), at .NET's `Optimal`
 Deflate level over a deterministic 1 MiB dataset (a 64 KiB xorshift/pattern block repeated). Each pass includes a separate 250 ms
@@ -38,20 +40,27 @@ hardware stability test).
 - Throughput uses decimal megabytes. Requested concurrency is distinguished from observed participation and per-worker bytes;
   participation does not prove simultaneous execution on separate physical cores.
 - Per-pass process CPU seconds and average busy logical processors are diagnostics that include small coordination overheads.
-- "Single-thread" means one worker, not a fixed affinity. On hybrid CPUs Windows may place it on a performance or an efficiency
-  core, which can move the result noticeably between runs.
+- "Single-thread" means one worker. On hybrid CPUs Windows may otherwise place it on a performance or an efficiency core (about
+  2x apart on the dev machine), so since v4 the worker selects the CPU sets of the highest efficiency class
+  (`SetThreadSelectedCpuSets`, respecting process affinity and reserved sets) and samples its current processor after every
+  operation. `corePlacement` says what was applied and `onFastestCoresPercent` how often it was observed on the fastest core
+  type (null on CPUs with one core type). Below 90% adds a quality note and a finding. Multithread workers are not steered.
 - If the stage reaches its time limit (its 20 s budget or the time left in the run), completed stages are kept, the unfinished
   stage has no score, and the stage status is `TimedOut`. User cancellation produces a Cancelled run without a partial aggregate.
 - The result depends on the runtime's Deflate implementation, so the .NET version matters.
 
-## RAM (`memory-v3`)
+## RAM (`memory-v4`)
 
-Two 32–256 MiB buffers, together at most one eighth of available RAM and at most 512 MiB; skipped if the minimum cannot fit.
-Pages are touched before timing and the buffers are released before the disk stage.
+Two fixed 256 MiB buffers (512 MiB in all). Earlier profiles shrank them to as little as 32 MiB on machines short of memory,
+where they could fit in a large CPU cache and make the slowest machines look fastest; 256 MiB is at least twice the largest
+consumer CPU cache. The test needs 1.5 GiB available (the buffers plus 1 GiB of headroom so it never pushes the PC into
+paging) and is skipped with a finding otherwise. Pages are touched before timing and the buffers are released before the disk
+stage.
 
 - **Single worker**: copy, read and write, each with one untimed warmup and three 0.9 s passes. Copy and write use managed spans;
   read is a vector OR reduction over every byte whose result is checked. Copy/write contents are verified outside timing.
-  A single thread cannot saturate the memory system, so this profile is largely insensitive to channel count.
+  A single thread cannot saturate the memory system, so this profile is largely insensitive to channel count. The worker is
+  steered to the fastest cores and its placement recorded, as for the CPU single-thread stage.
 - **Multithread** (new in v3): `min(logical processors, 8)` dedicated workers each stream their own 4 KiB-aligned slice of the
   same two buffers for read and for copy (three 400 ms passes each, after a warmup over the worker's slice and a rendezvous).
   Copy output is verified after timing. This is the figure that responds to single- versus dual-channel configurations. Passes are
@@ -61,24 +70,29 @@ Pages are touched before timing and the buffers are released before the disk sta
 - The RAM stage has a 21 s cooperative deadline. Completed bandwidth remains available if latency is interrupted; incomplete
   latency passes never produce an aggregate.
 
-### Memory latency (`dependent-access-v1`)
+### Memory latency (`dependent-access-v2`)
 
 Reuses one existing buffer after the bandwidth tests. A seeded Sattolo permutation forms one dependent index chain with 64-byte
 node spacing; a full traversal verifies and warms the chain before three 1.25 s measured passes. The aggregate is total
 measured time divided by total dependent accesses, in ns/access. It includes managed bounds checks, loop and cancellation
-overhead, TLB and cache behavior, and scheduling; it is not a DRAM-only latency. Large caches or a reduced buffer change
-comparisons.
+overhead, TLB and cache behavior, and scheduling; it is not a DRAM-only latency. The chain runs on the fastest cores (v2) over the
+fixed 256 MiB buffer.
 
 ## Disk (`disk-qd1-v3`)
 
 Unique `CREATE_NEW` file with delete-on-close; it never opens a user file for writing and removes nothing that already existed.
-At least 2 GiB of free space is required. Windows file-data caching is bypassed with `FILE_FLAG_NO_BUFFERING` and writes request
+The test always leaves 512 MiB free: the file is up to 1 GiB, smaller when free space is low (`fileLimitBytes`,
+`reducedForFreeSpace`, plus a finding), and the stage is skipped only when less than 64 MiB could be written (576 MiB free).
+Low free space is common on slow PCs, so it is reported rather than silently skipped. Windows file-data caching is bypassed with `FILE_FLAG_NO_BUFFERING` and writes request
 `WRITE_THROUGH`; native buffers are SafeHandle-owned, sector alignment is checked, and unsupported configurations (compressed,
 encrypted or sparse files, network or UNC paths, non-fixed volumes) are reported unsupported rather than measured through a
 cache. Hardware caches, controller or SAN caches, filters, deduplication and firmware can still influence results.
 
-- **Sequential write**: 1 MiB requests, up to 1 GiB or 2 s; also creates the test file (at least 32 MiB must be created).
-- **Sequential read**: 1 MiB requests over the created file for 6 s. Fast drives read the 1 GiB file many times in that window,
+- **Sequential write**: 1 MiB requests, up to the file limit (normally 1 GiB) or 2 s. Fast NVMe drives finish in well under a
+  second, mostly into their cache, so this is a burst figure (not in the ticket summary). The cap is deliberately small: an
+  8 GiB trial filled the SLC cache of a QLC, DRAM-less drive and back-to-back runs measured 3,442, 74 and 1,635 MB/s, with
+  lower reads too, so a retest would have made a healthy PC look slow; also creates the test file (at least 32 MiB must be created).
+- **Sequential read**: 1 MiB requests over the created file for 6 s. Fast drives can read the file more than once in that window,
   so the report gives both the aggregate and `firstPassMBps` (the first complete read) plus `filePasses`. The card shows the
   first-pass figure because later passes can be served from device or controller cache.
 - **Random write**: 4 KiB at deterministic offsets, queue depth 1, up to 16,384 operations (64 MiB) or 2 s; runs before random
@@ -128,8 +142,37 @@ utilization, AC/battery, battery charge when available, active power plan (not t
 system CPU sample. During the test, roughly one sample per second records system CPU, available RAM and power source with the
 actual interval. System CPU includes the benchmark itself and uses idle/kernel/user deltas (not frequency-normalized); multiple
 processor groups are marked unsupported rather than reporting a partial group. Optional collector failures become `warnings`
-and leave other collectors running; unavailable values are null, never invented zeros. Temperature and clock speed are **not**
-sampled, so a throughput change cannot be attributed to thermal throttling from this data alone.
+and leave other collectors running; unavailable values are null, never invented zeros.
+
+Also recorded before the test, without administrator rights: the power plan type (from its GUID, since names are localized and
+editable), the Settings power mode (`PowerGetEffectiveOverlayScheme`), Energy saver, the plan's maximum processor state and
+boost mode for the current power source, committed memory and the commit limit, free space on the Windows drive, time since
+Windows started (`GetTickCount64`, which includes sleep and survives Shut down with Fast Startup), pending-restart registry
+markers (Component Based Servicing and Windows Update), and the five busiest processes over the same two-second window as the
+CPU sample (`NtQuerySystemInformation` process list, so services and protected processes are included).
+
+During the test each activity sample also records `% Processor Performance` (average clock as a percentage of base; over 100
+is boost) and `% Performance Limit` from the Processor Information performance counters (English counter names, so any display
+language works). Temperatures are **not** available without administrator rights, so throttling is inferred from the clock.
+
+## Validity and findings
+
+`FindingRules` turns the data above into `findings` (severity, area, plain-language message) once a run ends. Thresholds are
+provisional, like the quality notes, until there is fleet data.
+
+- **Not valid** (`validity: "Invalid"`): the Power saver plan (or a custom plan named "...saver"), the power mode "Best power
+  efficiency" or "Battery saver" on the Balanced plan or a custom plan (Windows ignores the power mode on High/Ultimate
+  performance), or Energy saver on. The test still runs and keeps its numbers, but they must not be compared.
+- **Warnings**: on battery, or unplugged during the test; a custom plan whose name is not recognisably Balanced or Performance;
+  the plan's maximum processor state below 100% or boost disabled; system CPU above 20% before the test (with the busiest
+  processes); average clock below 80% of base during fully loaded CPU samples (at least 90% system CPU, i.e. the multithread
+  passes); the multithread CPU stage receiving under 75% of the requested CPU time; the single-thread stage on the fastest cores
+  less than 90% of the time; under 6 GiB of usable RAM; under 1 GiB or 10% of RAM available; commit above 90% of the limit;
+  RAM test skipped; the Windows drive under 10 GiB or 10% free; disk test skipped or reduced; no restart for more than 7 days; a
+  pending restart; and the hardware hints below.
+
+Invalid findings are listed first. The panel shows the first finding in its alert line (red when the run is not valid) with
+the rest in its tooltip and the results text, and the text report has a FINDINGS section under the status.
 
 API references: [CPU topology](https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getlogicalprocessorinformationex),
 [CPU time counters](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getsystemtimes),

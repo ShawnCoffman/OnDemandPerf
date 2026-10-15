@@ -1,11 +1,29 @@
 # Changelog
 
-## Unreleased — review fixes
+## 0.8.0 (unreleased) — support-test changes and review fixes
 
-Result schema and benchmark profiles are unchanged; scores stay comparable with 0.7.0.
+Result schema 2.2 (additive, see `docs/schema.md`). Profiles `deflate-v4`, `memory-v4`, `dependent-access-v2`: CPU and RAM
+scores are **not** comparable with 0.7.0. `disk-qd1-v3` is unchanged for full-size runs.
 
 ### Added
+- Validity: a run in the Power saver plan, the "Best power efficiency" power mode or with Energy saver on is marked NOT VALID
+  (red in the panel, at the top of the report, `validity` in JSON, exit code 1). Battery runs stay valid but are labelled.
+- Findings: plain-language causes of slowness in the panel, results text and report: background CPU before the test with the
+  busiest processes, CPU below base clock under load, low/committed memory, small RAM, nearly full Windows drive, uptime over
+  7 days, pending restart, power-plan CPU caps or boost off, plus the hardware hints.
+- Ticket summary: a short block at the top of `Latest.txt` and a **Copy Summary** button in the panel.
+- CPU clock and Windows performance limit sampled about once a second during the test (performance counters, no admin).
 - MIT license. README rewritten for outside readers (what it is, getting started, privacy, limitations).
+
+### Changed
+- Single-worker CPU, RAM and latency measurements are steered to the fastest cores on hybrid CPUs and record where they ran.
+- RAM buffers are fixed at 2 x 256 MiB (needs 1.5 GiB available; skipped with a finding otherwise).
+- The disk test no longer needs 2 GiB free: it shrinks the 1 GiB test file to leave 512 MiB free, and flags reduced runs.
+  (An 8 GiB file was tried and rejected: it made back-to-back runs unrepeatable on QLC drives; see methodology.)
+- Less noise in the report: no battery-charge line without a battery, busy processes listed only when the PC was busy, no
+  duplicate manufacturer/model/BIOS lines, and disk notes no longer repeat the method text on every run.
+- Cards now show CPU single-thread MB/s, RAM multithread read GB/s and disk 4K random-read IOPS; everything else stays in
+  the report.
 
 ### Fixed
 - A run that reaches the 55-second work deadline is no longer reported as "Test cancelled". User cancellation and the deadline

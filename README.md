@@ -38,11 +38,24 @@ while a test runs.
   generation, speed, module and slot count) and the drive under test (model, bus, NVMe version). It is read the first time the
   panel opens and is also stored in every report. An amber line appears when that identity suggests a cause (a single RAM module,
   RAM running below its rated speed, a spinning disk, USB storage).
-- After a run, the cards show CPU multithread MB/s, RAM copy GB/s and disk sequential-read MB/s (first full pass of the test
-  file); the log and report keep every other measurement.
+- After a run, the cards show the figures closest to how fast a PC feels: CPU single-thread MB/s, RAM multithread read GB/s
+  and disk 4K random-read IOPS. The log and report keep every other measurement (CPU multithread, RAM copy/write and latency,
+  disk sequential and write speeds).
+- **Findings** appear after a run, in the panel's alert line (hover for all of them), at the top of the results text and at
+  the top of the report. They name common causes of slowness found before or during the test: a busy PC (with the busiest
+  processes), the CPU running below its base clock under load (heat or power limits), little free or committed memory, a
+  nearly full Windows drive, no restart for over a week, a pending restart, power-plan CPU limits, and the hardware hints above.
+- **Copy Summary** puts a short, paste-ready block on the clipboard for a support ticket: machine, whether the run is valid,
+  power state, the three headline numbers, a few secondary numbers and every finding. The same block opens `Latest.txt`, above
+  the full details.
+- **Power saving makes a run not valid.** If the power plan is Power saver, the Windows power mode is "Best power efficiency",
+  or Energy saver is on, the test still runs but the result is marked NOT VALID (red, in the panel and report) and should not be
+  compared; switch to Balanced or High performance / Best performance and run again. A run on **battery** is valid but clearly
+  labelled, because laptops usually run slower unplugged.
 
-The disk test writes a temporary file of up to about 1 GiB under `%LOCALAPPDATA%\OnDemandPerf\TestData` and deletes it
-afterwards, including when a run is cancelled or killed. It needs at least 2 GiB of free space and is skipped otherwise.
+The disk test writes a temporary file of up to 1 GiB under `%LOCALAPPDATA%\OnDemandPerf\TestData` and deletes it afterwards,
+including when a run is cancelled or killed. It always leaves at least 512 MiB free: on a nearly full drive it uses a smaller
+file (reported as a finding, since those disk numbers are not comparable) and skips the disk test only below 576 MiB free.
 
 ## Results and privacy
 
@@ -52,7 +65,8 @@ Default location: `%LOCALAPPDATA%\OnDemandPerf`.
 - `Results/`: up to 50 historical JSON/text pairs
 - `OnDemandPerf.log`: rotates at 2 MiB, retaining one backup
 
-Reports include the computer name, Windows version and the hardware identity above. They are written only to this folder:
+Reports include the computer name, Windows version, the hardware identity above and the names of the five busiest processes
+in the two seconds before the test. They are written only to this folder:
 nothing is uploaded and the app makes no network connections. Serial numbers are deliberately not collected. Field-level
 detail is in [docs/schema.md](docs/schema.md).
 
@@ -71,7 +85,8 @@ detail is in [docs/schema.md](docs/schema.md).
 for ingestion. Switches are case-insensitive. Lines starting with `##` on standard output are a machine-readable protocol for
 the tray (`##stage <CPU|RAM|Disk>`, `##report <path>`); everything else is human-readable.
 
-Exit codes: `0` success; `1` component failure, incomplete stage or cancellation; `2` fatal error or invalid arguments;
+Exit codes: `0` success; `1` component failure, incomplete stage, cancellation, or a run that is not valid because power
+saving was on (`validity` in the JSON says which); `2` fatal error or invalid arguments;
 `3` another worker is running (including one owned by another account). Ctrl+C cancels a console run, and a controlling
 process can send a `cancel` line to redirected standard input (closing standard input does not cancel). The worker stops
 work at 55 seconds to reserve cleanup/report time: each stage ends early enough to keep its completed measurements, and a run
@@ -125,7 +140,8 @@ If Smart App Control or SmartScreen blocks your own unsigned build, that is why.
 - Numbers are a quick screen, not a lab benchmark. Fixed inputs make runs repeatable, but background activity, power plan,
   battery, thermals, the .NET version and hardware configuration all affect results. Compare runs from the same machine, or
   machines of the same model, and read [docs/methodology.md](docs/methodology.md) before drawing conclusions.
-- Not yet implemented: PCIe link speed, CPU frequency/thermal sampling, and comparison against previous runs or a baseline.
+- Not yet implemented: PCIe link speed, CPU temperatures (the clock is sampled, so throttling is inferred, not measured), and
+  comparison against previous runs or a per-model baseline. Finding thresholds are provisional.
 - Running the worker as another account or as SYSTEM has not been tested.
 
 ## License

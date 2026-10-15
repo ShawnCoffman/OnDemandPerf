@@ -26,12 +26,23 @@
       `/show` opens it on the primary monitor's taskbar corner.
 - [ ] A slow machine (HDD or USB test drive) to see a late stage end `TimedOut` and the run `Partial` instead of `Cancelled`.
 
+## Support-test changes (0.8.0, 2026-10-14)
+
+- [x] Unit tests, build and a full run on the dev machine (desktop, High performance, AC): single-thread CPU, single-worker RAM
+      and latency 100% on P-cores; clock under load 133% of base; 49.3 s; a real pending restart was found.
+- [ ] A laptop: Balanced plan with each Settings power mode (confirm the "Best power efficiency" GUID marks the run not valid
+      and "Best performance" does not), Energy saver on, on battery, and unplugging mid-run.
+- [ ] Check the below-base-clock rule on a hybrid laptop under sustained load: if efficiency cores report against the P-core
+      base clock, the 80% threshold may need raising or lowering.
+- [ ] A PC with less than 1.5 GiB of free RAM (RAM test skipped) and a nearly full drive (reduced disk file).
+- [ ] Decide whether "not valid" should stop the test before it starts instead of running it for 50 seconds.
+
 ## Product ideas, in rough priority order
 
 1. Compare with previous runs on this machine (history is already kept) and an optional per-model baseline with Pass/Warn.
-2. "Likely causes" section from data already captured (battery, power plan, baseline CPU, low RAM, high variance, low busy-CPU).
+2. ~~"Likely causes" section~~ done in 0.8.0 as findings; still missing: high pass variation as a finding.
 3. ~~Hardware identity~~ done in 0.7.0 (serial numbers deliberately left out).
-4. Frequency / thermal sampling (the `% Processor Performance` counter is the candidate; `CallNtPowerInformation` current MHz is
+4. ~~Frequency sampling~~ done in 0.8.0 (`% Processor Performance`); temperatures still need administrator access (`CallNtPowerInformation` current MHz is
    unreliable on modern CPUs).
 5. Move static method text (`method`, `cachePolicy`, `dataset`, notes) out of every JSON record behind the profile id.
 6. More, shorter CPU passes, and a median-based headline.
