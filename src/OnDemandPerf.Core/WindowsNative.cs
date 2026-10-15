@@ -61,6 +61,54 @@ internal static class WindowsNative
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "CreateFileW")]
     internal static extern SafeFileHandle OpenDevice(string name, uint access, uint share, IntPtr security,
         uint disposition, uint flags, IntPtr template);
+    [DllImport("powrprof.dll")]
+    internal static extern uint PowerReadACValueIndex(IntPtr root, ref Guid scheme, ref Guid subgroup, ref Guid setting, out uint value);
+    [DllImport("powrprof.dll")]
+    internal static extern uint PowerReadDCValueIndex(IntPtr root, ref Guid scheme, ref Guid subgroup, ref Guid setting, out uint value);
+    /// <summary>The Settings power mode in effect (Windows 10 1709+); not in the SDK headers, so callers handle a missing export.</summary>
+    [DllImport("powrprof.dll")]
+    internal static extern uint PowerGetEffectiveOverlayScheme(out Guid overlay);
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct ProcessorNumber
+    {
+        internal ushort Group;
+        internal byte Number, Reserved;
+    }
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetSystemCpuSetInformation([Out] byte[]? information, uint length, out uint returned,
+        IntPtr process, uint flags);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SetThreadSelectedCpuSets(IntPtr thread, uint[]? cpuSetIds, uint count);
+    [DllImport("kernel32.dll")]
+    internal static extern IntPtr GetCurrentThread();
+    [DllImport("kernel32.dll")]
+    internal static extern void GetCurrentProcessorNumberEx(out ProcessorNumber number);
+
+    /// <summary>Class 5 (SystemProcessInformation) lists every process with its CPU times without opening any of them.</summary>
+    [DllImport("ntdll.dll")]
+    internal static extern int NtQuerySystemInformation(int informationClass, IntPtr buffer, int length, out int returned);
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct PdhCounterValue
+    {
+        internal uint Status;
+        internal double Value;
+    }
+    [DllImport("pdh.dll", CharSet = CharSet.Unicode, EntryPoint = "PdhOpenQueryW")]
+    internal static extern uint PdhOpenQuery(string? dataSource, IntPtr userData, out IntPtr query);
+    /// <summary>English counter paths work on every display language.</summary>
+    [DllImport("pdh.dll", CharSet = CharSet.Unicode, EntryPoint = "PdhAddEnglishCounterW")]
+    internal static extern uint PdhAddEnglishCounter(IntPtr query, string path, IntPtr userData, out IntPtr counter);
+    [DllImport("pdh.dll")]
+    internal static extern uint PdhCollectQueryData(IntPtr query);
+    [DllImport("pdh.dll")]
+    internal static extern uint PdhGetFormattedCounterValue(IntPtr counter, uint format, out uint type, out PdhCounterValue value);
+    [DllImport("pdh.dll")]
+    internal static extern uint PdhCloseQuery(IntPtr query);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool DeviceIoControl(SafeFileHandle device, uint code, byte[]? input, uint inputSize,

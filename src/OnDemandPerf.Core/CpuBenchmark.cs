@@ -13,7 +13,7 @@ public static class CpuBenchmark
     internal const int PassCount = 3;
     internal const int BudgetSeconds = 20;
     public const string DatasetId = "xorshift32-seed-12345678-repeated-64KiB-v1";
-    public static string Profile { get; } = ProfileHash.Compute("deflate-v3", DatasetId, InputBytes, WarmupMilliseconds,
+    public static string Profile { get; } = ProfileHash.Compute("deflate-v4", DatasetId, InputBytes, WarmupMilliseconds,
         SingleMilliseconds, MultiMilliseconds, PassCount, "Optimal");
 
     /// <param name="cancellationToken">User cancellation only; time limits come from the budget and <paramref name="available"/>.</param>
@@ -46,6 +46,8 @@ public static class CpuBenchmark
             if (UtilizationNote(name, stage) is { } utilization) result.QualityNotes.Add(utilization);
             if (stage.VariationPercent > 5)
                 result.QualityNotes.Add($"{name}: pass variation exceeded the provisional 5% noise threshold; consider retesting.");
+            if (stage.OnFastestCoresPercent < 90)
+                result.QualityNotes.Add($"{name}: ran on the fastest core type for only {stage.OnFastestCoresPercent:F0}% of samples ({stage.CorePlacement}); the score may understate the machine.");
             if (stage.FirstToLastChangePercent < -10)
                 result.QualityNotes.Add($"{name}: throughput fell more than 10% from first to last pass; this does not establish a thermal cause.");
         }
@@ -81,6 +83,9 @@ public static class CpuBenchmark
         stage.MedianMBps = Stats.Median(rates);
         stage.VariationPercent = Stats.VariationPercent(rates);
         stage.FirstToLastChangePercent = (rates[^1] / rates[0] - 1) * 100;
+        stage.CorePlacement = stage.Passes[0].CorePlacement;
+        var placed = stage.Passes.Where(p => p.OnFastestCoresPercent.HasValue).ToArray();
+        stage.OnFastestCoresPercent = placed.Length == 0 ? null : placed.Average(p => p.OnFastestCoresPercent!.Value);
         return stage;
     }
 
@@ -98,6 +103,8 @@ public static class CpuBenchmark
         var ends = new long[workers];
         long start = 0;
         double cpuBefore = 0, cpuAfter = 0;
+        string? placementDescription = null;
+        double? onFastest = null;
         try
         {
             for (int worker = 0; worker < workers; worker++)
@@ -106,6 +113,8 @@ public static class CpuBenchmark
                 var thread = new Thread(() =>
                 {
                     bool signalledFinished = false;
+                    // A lone worker is steered to the fastest cores; a full set of workers already covers every core.
+                    using var placement = workers == 1 ? CoreSelection.PreferFastest() : null;
                     try
                     {
                         using var output = new MemoryStream(data.Length + 65536);
@@ -118,8 +127,10 @@ public static class CpuBenchmark
                         {
                             Compress(data, output, stop.Token);
                             localBytes += data.Length;
+                            placement?.Sample();
                         }
                         bytes[index] = localBytes;
+                        if (placement is not null) (placementDescription, onFastest) = (placement.Description, placement.OnFastestPercent);
                         ends[index] = Stopwatch.GetTimestamp();
                         finished.Signal();
                         signalledFinished = true;
@@ -158,7 +169,7 @@ public static class CpuBenchmark
             ParticipatingWorkers = bytes.Count(b => b > 0), WorkerBytesProcessed = bytes,
             ProcessCpuSeconds = Math.Max(0, cpuAfter - cpuBefore),
             AverageBusyLogicalProcessors = Math.Max(0, cpuAfter - cpuBefore) / seconds,
-            OutputVerified = true
+            OutputVerified = true, CorePlacement = placementDescription, OnFastestCoresPercent = onFastest
         };
     }
 

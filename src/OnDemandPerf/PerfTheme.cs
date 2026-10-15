@@ -13,6 +13,7 @@ internal static class PerfTheme
     internal static readonly Color Green = Color.FromArgb(104, 234, 113);
     internal static readonly Color Purple = Color.FromArgb(209, 137, 246);
     internal static readonly Color Amber = Color.FromArgb(247, 192, 92);
+    internal static readonly Color Red = Color.FromArgb(255, 107, 107);
 
     internal static Icon LoadIcon()
     {

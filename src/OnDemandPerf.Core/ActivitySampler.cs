@@ -10,7 +10,13 @@ public sealed class ActivityResult
     public List<string> Notes { get; init; } = [];
 }
 public sealed record ActivitySample(double ElapsedSeconds, double IntervalSeconds, string Stage,
-    double? SystemCpuPercent, ulong? AvailableMemoryBytes, string PowerSource);
+    double? SystemCpuPercent, ulong? AvailableMemoryBytes, string PowerSource)
+{
+    /// <summary>Average CPU clock as a percentage of its base clock (above 100 is boost); from "% Processor Performance".</summary>
+    public double? ProcessorPerformancePercent { get; init; }
+    /// <summary>Windows' "% Performance Limit": below 100 means firmware limited the clock (power, thermal or platform).</summary>
+    public double? PerformanceLimitPercent { get; init; }
+}
 
 public sealed class ActivitySampler : IDisposable
 {
@@ -26,6 +32,7 @@ public sealed class ActivitySampler : IDisposable
         {
             try
             {
+                using var clockCounters = ClockCounters.TryOpen(Result.Notes);
                 bool supported = WindowsNative.GetActiveProcessorGroupCount() == 1;
                 if (!supported) Result.Notes.Add("System CPU sampling unavailable with multiple processor groups.");
                 bool previousValid = WindowsNative.GetSystemTimes(out ulong idle, out ulong kernel, out ulong user);
@@ -47,7 +54,9 @@ public sealed class ActivitySampler : IDisposable
                     ulong? available = WindowsNative.GlobalMemoryStatusEx(ref memory) ? memory.AvailablePhysical : null;
                     string power = WindowsNative.GetSystemPowerStatus(out var state)
                         ? state.AcLineStatus switch { 0 => "Battery", 1 => "AC", _ => "Unknown" } : "Unavailable";
-                    Result.Samples.Add(new(now, now - previous, Volatile.Read(ref stage), cpu, available, power));
+                    var (performance, limit) = clockCounters?.Read() ?? (null, null);
+                    Result.Samples.Add(new(now, now - previous, Volatile.Read(ref stage), cpu, available, power)
+                        { ProcessorPerformancePercent = performance, PerformanceLimitPercent = limit });
                     previous = now;
                 }
             }
@@ -56,5 +65,42 @@ public sealed class ActivitySampler : IDisposable
         });
     }
     public void Dispose() { if (disposed) return; disposed = true; stop.Cancel(); task.GetAwaiter().GetResult(); stop.Dispose(); }
+
+    /// <summary>
+    /// Performance-counter view of the CPU clock across all processors, readable without administrator rights. Temperatures
+    /// are not available this way, so throttling is inferred from the clock, never measured directly.
+    /// </summary>
+    private sealed class ClockCounters : IDisposable
+    {
+        private const uint FormatDouble = 0x200, NoCap100 = 0x8000;
+        private readonly IntPtr query, performance, limit;
+        private ClockCounters(IntPtr query, IntPtr performance, IntPtr limit) => (this.query, this.performance, this.limit) = (query, performance, limit);
+
+        public static ClockCounters? TryOpen(List<string> notes)
+        {
+            if (WindowsNative.PdhOpenQuery(null, IntPtr.Zero, out var query) != 0) { notes.Add("CPU clock counters unavailable."); return null; }
+            if (WindowsNative.PdhAddEnglishCounter(query, @"\Processor Information(_Total)\% Processor Performance", IntPtr.Zero, out var performance) != 0 ||
+                WindowsNative.PdhAddEnglishCounter(query, @"\Processor Information(_Total)\% Performance Limit", IntPtr.Zero, out var limit) != 0)
+            {
+                WindowsNative.PdhCloseQuery(query);
+                notes.Add("CPU clock counters unavailable on this system.");
+                return null;
+            }
+            WindowsNative.PdhCollectQueryData(query); // rate counters need a first sample
+            return new ClockCounters(query, performance, limit);
+        }
+
+        public (double?, double?) Read()
+        {
+            if (WindowsNative.PdhCollectQueryData(query) != 0) return (null, null);
+            return (Value(performance), Value(limit));
+        }
+
+        private static double? Value(IntPtr counter) =>
+            WindowsNative.PdhGetFormattedCounterValue(counter, FormatDouble | NoCap100, out _, out var value) == 0 && value.Status <= 1
+                ? Math.Round(value.Value, 1) : null;
+
+        public void Dispose() => WindowsNative.PdhCloseQuery(query);
+    }
 }
 

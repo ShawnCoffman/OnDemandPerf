@@ -5,6 +5,11 @@ namespace OnDemandPerf.Core;
 public static class DiskBenchmark
 {
     internal const int BlockBytes = 1024 * 1024;
+    /// <summary>
+    /// Up to 1 GiB of 1 MiB writes. Deliberately small: an 8 GiB trial filled the SLC cache of a QLC, DRAM-less NVMe drive, and
+    /// back-to-back runs then measured 3,442, 74 and 1,635 MB/s sequential writes and lower reads, so a retest made the PC look
+    /// slow. At 1 GiB fast drives finish in a fraction of a second (a burst figure), but the read results stay repeatable.
+    /// </summary>
     internal const int SeqWriteMaxOperations = 1024;
     internal const int SeqWriteMilliseconds = 2000;
     internal const int SeqReadMilliseconds = 6000;
@@ -20,6 +25,10 @@ public static class DiskBenchmark
         SeqReadMilliseconds, RandomBlockBytes, RandomWriteMaxOperations, RandomWriteMilliseconds, ObservationWindowMilliseconds,
         RandomWriteSeed, RandomReadSeed);
     public static string DefaultDirectory => Path.Combine(ResultStore.DefaultDirectory, "TestData");
+    /// <summary>Free space the test always leaves on the volume; the test file shrinks to respect it.</summary>
+    internal const long ReserveFreeBytes = 512L * 1024 * 1024;
+    /// <summary>Smallest useful test file: it must hold the 64 MiB random-write range.</summary>
+    internal const long MinimumFileBytes = 64L * 1024 * 1024;
     /// <summary>Time kept back after the random-read window for its verification and the end of the stage.</summary>
     internal const int RandomReadReserveMilliseconds = 500;
 
@@ -42,8 +51,19 @@ public static class DiskBenchmark
             result.Volume = drive.Name; result.FileSystem = drive.DriveFormat; result.FreeBytesBefore = drive.AvailableFreeSpace;
             if (drive.DriveType != DriveType.Fixed) throw new NotSupportedException("Only local fixed volumes are supported.");
             const int block = BlockBytes;
-            if (result.FreeBytesBefore < 2L * 1024 * block)
-            { result.Status = "Skipped"; result.Notes.Add("At least 2 GiB free space is required; disk test skipped."); return result; }
+            // Low free space is common on slow PCs, so test with a smaller file rather than skipping, and say so.
+            result.FileLimitBytes = FileLimit(result.FreeBytesBefore);
+            if (result.FileLimitBytes == 0)
+            {
+                result.Status = "Skipped";
+                result.Notes.Add(FormattableString.Invariant($"Only {result.FreeBytesBefore / 1048576} MiB free on {drive.Name}; the disk test needs {(ReserveFreeBytes + MinimumFileBytes) / 1048576} MiB so it can always leave {ReserveFreeBytes / 1048576} MiB free."));
+                return result;
+            }
+            if (result.FileLimitBytes < (long)SeqWriteMaxOperations * block)
+            {
+                result.ReducedForFreeSpace = true;
+                result.Notes.Add($"Low free space: the test file was limited to {result.FileLimitBytes / 1048576} MiB instead of 1 GiB. Disk numbers are not comparable with full-size runs.");
+            }
             // Results may be redirected, but default testing must stay on the Windows volume.
             if (Path.GetFullPath(directory).Equals(Path.GetFullPath(DefaultDirectory), StringComparison.OrdinalIgnoreCase) &&
                 !drive.Name.Equals(Path.GetPathRoot(Environment.SystemDirectory), StringComparison.OrdinalIgnoreCase))
@@ -57,11 +77,8 @@ public static class DiskBenchmark
             {
                 owned = true;
                 result.LogicalSectorBytes = file.LogicalSectorBytes; result.PhysicalSectorBytes = file.PhysicalSectorBytes;
-                result.Notes.Add("Queue depth 1, write-through: measures application I/O, not vendor peak bandwidth. Hardware caches and repeated-block deduplication can still affect results.");
-                result.Notes.Add("Writes capped at 1 GiB sequential plus 64 MiB random; unused write time goes to random reads; random offsets use fixed seeds, with reads on a different sequence from writes. Individual OS I/O requests may outlast cooperative deadlines.");
-                result.Notes.Add("Sequential verification samples first/middle/last blocks; random read verifies its final block; random write verifies every completed write location. This is a performance screen, not a surface or endurance test.");
-                progress("Disk sequential write: creating at most 1 GiB of test data...");
-                var write = Measure("SequentialWrite", block, SeqWriteMaxOperations, SeqWriteMilliseconds, i => i * block, true, file, budget.Token,
+                progress($"Disk sequential write: creating at most {result.FileLimitBytes / 1048576} MiB of test data...");
+                var write = Measure("SequentialWrite", block, (int)(result.FileLimitBytes / block), SeqWriteMilliseconds, i => i * block, true, file, budget.Token,
                     bytes => { result.TotalBytesWritten += bytes; result.FileBytes += bytes; });
                 result.FileBytes = write.BytesProcessed;
                 VerifySamples(file, pattern, result.FileBytes, budget.Token);
@@ -71,7 +88,7 @@ public static class DiskBenchmark
                 var read = Measure("SequentialRead", block, 1_000_000, SeqReadMilliseconds, i => i * block % result.FileBytes, false, file, budget.Token,
                     firstPassOperations: result.FileBytes / block);
                 if (read.FilePasses is > 1.5)
-                    result.Notes.Add($"SequentialRead revisited the {result.FileBytes / 1048576} MiB test file {read.FilePasses:F1} times in its window; later reads can be served from device or controller cache. FirstPassMBps is the first complete read and is the more conservative figure.");
+                    result.Notes.Add($"Sequential read covered the {result.FileBytes / 1048576} MiB test file {read.FilePasses:F1} times; the first full pass is the conservative figure.");
                 VerifySamples(file, pattern, result.FileBytes, budget.Token);
                 result.Measurements.Add(read with { Verified = true });
                 var originalPattern = (byte[])pattern.Clone();
@@ -107,8 +124,6 @@ public static class DiskBenchmark
                 byte[] expected = modifiedOffsets.Contains(lastRandomOffset) ? pattern : originalPattern;
                 if (!file.Matches(expected, (int)(lastRandomOffset % block), 4096)) throw new InvalidDataException("Random read sample verification failed.");
                 result.Measurements.Add(randomRead with { Verified = true });
-                foreach (var measurement in result.Measurements.Where(m => m.ShortBurst))
-                    result.Notes.Add($"{measurement.Operation}: short burst sample ({measurement.DurationSeconds:F3}s) ({measurement.StopReason}); do not interpret as sustained performance.");
                 if (result.Measurements.Any(m => m.Status != "Success")) result.Status = "Partial";
             }
         }
@@ -123,6 +138,13 @@ public static class DiskBenchmark
             result.DurationSeconds = total.Elapsed.TotalSeconds;
         }
         return result;
+    }
+
+    /// <summary>Largest test file for this much free space, always leaving <see cref="ReserveFreeBytes"/>; 0 when too small to test.</summary>
+    internal static long FileLimit(long freeBytes)
+    {
+        long limit = Math.Min((long)SeqWriteMaxOperations * BlockBytes, (freeBytes - ReserveFreeBytes) / BlockBytes * BlockBytes);
+        return limit < MinimumFileBytes ? 0 : limit;
     }
 
     private static DiskMeasurement Measure(string operation, int block, int maxOperations, int milliseconds,
