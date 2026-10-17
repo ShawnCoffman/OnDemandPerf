@@ -34,6 +34,8 @@ internal sealed class TestWindow : Form
     private string? reportPath;
     /// <summary>The result shown after this session's last run; Copy Summary falls back to Latest.json before the first run.</summary>
     private AnalysisResult? lastResult;
+    /// <summary>The text report of <see cref="lastResult"/>; Open Results uses it so another run replacing Latest.txt cannot swap the file.</summary>
+    private string? lastReportText;
     private string? outcome;
     private WorkerJob? job;
     private Screen? placementScreen;
@@ -111,12 +113,12 @@ internal sealed class TestWindow : Form
         layout.Controls.Add(new Label { Text = "ON DEMAND ONLY   ·   Close to hide, tests continue", ForeColor = PerfTheme.Muted, Font = new Font("Segoe UI", 8), Dock = DockStyle.Fill }, 0, 10);
         Controls.Add(layout);
         output.Text = "Run one performance test to check CPU, RAM and disk.\r\n\r\nEach operation will appear here as it runs.";
-        results.Enabled = File.Exists(Path.Combine(ResultStore.DefaultDirectory, "Latest.txt"));
+        results.Enabled = File.Exists(LatestText);
         copy.Enabled = File.Exists(LatestJson);
         copy.Click += (_, _) => CopySummary();
         run.Click += async (_, _) => await RunAsync();
         cancel.Click += async (_, _) => await StopAsync();
-        results.Click += (_, _) => TrayContext.OpenResults(true);
+        results.Click += (_, _) => OpenShownResults();
         timer.Tick += (_, _) => { elapsed.Text = $"{clock.Elapsed.TotalSeconds:F0}s elapsed · CPU, RAM and disk"; progress.Advance(); cpuCard.Advance(); ramCard.Advance(); diskCard.Advance(); };
         FormClosing += (_, e) => { if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); } };
         KeyPreview = true;
@@ -211,12 +213,18 @@ internal sealed class TestWindow : Form
         PlaceNearTray();
     }
 
-    /// <summary>Bottom-right of the working area, shortened (the activity box absorbs it) when the screen is too short.</summary>
+    /// <summary>
+    /// Bottom-right of the working area, shortened (the activity box absorbs it) when the screen is too short. It never extends
+    /// past the working area: below the minimum height the content keeps that height and the panel scrolls instead.
+    /// </summary>
     private void PlaceNearTray()
     {
         var area = (placementScreen ?? Screen.FromControl(this)).WorkingArea;
         int margin = LogicalToDeviceUnits(12);
-        Height = Math.Max(LogicalToDeviceUnits(MinimumPanelHeight), Math.Min(preferredHeight, area.Height - margin * 2));
+        var (height, scrollHeight) = PanelFit.Compute(preferredHeight, LogicalToDeviceUnits(MinimumPanelHeight), area.Height - margin * 2);
+        Height = height;
+        AutoScrollMinSize = new Size(0, scrollHeight); // setting this switches AutoScroll on, so AutoScroll is set after it
+        AutoScroll = scrollHeight > 0;
         Location = new Point(Math.Max(area.Left, area.Right - Width - margin), Math.Max(area.Top, area.Bottom - Height - margin));
     }
 
@@ -275,7 +283,7 @@ internal sealed class TestWindow : Form
                 // The worker names the exact file it wrote; never guess from Latest.json and timestamps.
                 var path = reportPath ?? throw new InvalidOperationException("No report was saved for this test.");
                 ShowResult(ResultStore.Load(path));
-                results.Enabled = File.Exists(Path.Combine(ResultStore.DefaultDirectory, "Latest.txt"));
+                lastReportText = ResultStore.TextReportPath(path);
             }
             else
             {
@@ -310,6 +318,7 @@ internal sealed class TestWindow : Form
             IsRunning = false;
             run.Enabled = true; cancel.Enabled = false;
             copy.Enabled = lastResult is not null || File.Exists(LatestJson);
+            results.Enabled = File.Exists(ShownReportText);
             StateChanged?.Invoke(this, EventArgs.Empty);
             // A user who cancelled (or chose Exit) already knows; everyone else hears about every outcome, not just success.
             if (!cancelling) RunCompleted?.Invoke(this, outcome ?? status.Text);
@@ -317,6 +326,15 @@ internal sealed class TestWindow : Form
     }
 
     private static string LatestJson => Path.Combine(ResultStore.DefaultDirectory, "Latest.json");
+    private static string LatestText => Path.Combine(ResultStore.DefaultDirectory, "Latest.txt");
+
+    /// <summary>
+    /// The report for the run the panel shows, matching Copy Summary. Before the first run, or once history pruning has removed
+    /// that run's file, it is Latest.txt.
+    /// </summary>
+    private string ShownReportText => lastReportText is { } shown && File.Exists(shown) ? shown : LatestText;
+
+    private void OpenShownResults() => TrayContext.Open(ShownReportText);
 
     /// <summary>Puts the ticket summary on the clipboard and confirms on the button itself, leaving the headline alone.</summary>
     private void CopySummary()

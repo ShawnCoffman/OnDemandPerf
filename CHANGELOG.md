@@ -34,6 +34,13 @@ scores are **not** comparable with 0.7.0. `disk-qd1-v3` is unchanged for full-si
 - The worker is in a job object owned by the tray, so it is ended if the tray crashes, is killed or the user signs out.
   The worker's standard-input reader now accepts `cancel` on any line.
 - A reader error during cleanup could escape an async event handler and crash the tray.
+- Cancelling during the multithread CPU stage no longer throws away the finished single-thread score: `cpu` is kept with
+  status `Cancelled`, as RAM and disk already did. The run is still `Cancelled`.
+- The panel's **Open Results** opens the report of the run it is showing (matching Copy Summary), not whatever `Latest.txt`
+  holds after a later command-line run. The tray menu's Open Results still opens the latest report.
+- On a screen too short for the panel's minimum height (for example 1080p at 200%), the panel stays inside the working
+  area and scrolls instead of running off the bottom of the screen.
+- `Test-Smoke.ps1` kills any worker it started when an assertion fails, and its output reads time out instead of hanging.
 - The RAM "XMP/EXPO may be off" hint no longer appears for laptop memory (SODIMM, CAMM, soldered); CAMM modules are
   recognised; the below-rated check cannot overflow on bad firmware values.
 - The panel shrinks to fit short screens, is positioned before it appears, and `/show` places it on the primary monitor

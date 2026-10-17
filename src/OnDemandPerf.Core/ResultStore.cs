@@ -38,6 +38,9 @@ public sealed class ResultStore(string directory, bool compact = false)
         return historyJson;
     }
 
+    /// <summary>The text report saved beside a history JSON path returned by <see cref="Save"/>.</summary>
+    public static string TextReportPath(string historyJsonPath) => Path.ChangeExtension(historyJsonPath, ".txt");
+
     /// <summary>Loads a saved report into the same typed model the worker wrote.</summary>
     public static AnalysisResult Load(string path)
     {

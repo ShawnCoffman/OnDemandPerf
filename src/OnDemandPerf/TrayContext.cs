@@ -48,13 +48,16 @@ internal sealed class TrayContext : ApplicationContext
 
     internal void ShowWindow(bool fromTrayIcon) => window.ShowNearTray(fromTrayIcon);
 
-    internal static void OpenResults(bool latest)
+    internal static void OpenResults(bool latest) =>
+        Open(latest ? Path.Combine(ResultStore.DefaultDirectory, "Latest.txt") : ResultStore.DefaultDirectory);
+
+    /// <summary>Opens a text report or the results folder; a missing report means no run has saved one yet.</summary>
+    internal static void Open(string path)
     {
         try
         {
             Directory.CreateDirectory(ResultStore.DefaultDirectory);
-            var path = latest ? Path.Combine(ResultStore.DefaultDirectory, "Latest.txt") : ResultStore.DefaultDirectory;
-            if (!File.Exists(path) && latest) { MessageBox.Show("Choose Run Perf Test to create results.", "OnDemand Perf"); return; }
+            if (!File.Exists(path) && !Directory.Exists(path)) { MessageBox.Show("Choose Run Perf Test to create results.", "OnDemand Perf"); return; }
             Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
         }
         catch (Exception ex) { MessageBox.Show(ex.Message, "Unable to open results"); }

@@ -18,7 +18,14 @@ public static class CpuBenchmark
 
     /// <param name="cancellationToken">User cancellation only; time limits come from the budget and <paramref name="available"/>.</param>
     /// <param name="available">Time left in the run for this stage; the stage stops at this or its own budget, whichever is sooner.</param>
-    public static CpuResult Run(CancellationToken cancellationToken, Action<string> progress, TimeSpan? available = null)
+    public static CpuResult Run(CancellationToken cancellationToken, Action<string> progress, TimeSpan? available = null) =>
+        Run(cancellationToken, progress, available, MeasureStage);
+
+    /// <summary>Measures one stage (all of its passes); the seam lets tests drive cancellation without running the benchmark.</summary>
+    internal delegate CpuMeasurement StageMeasurer(byte[] data, int workers, int milliseconds, string name,
+        CancellationToken token, Action<string> progress);
+
+    internal static CpuResult Run(CancellationToken cancellationToken, Action<string> progress, TimeSpan? available, StageMeasurer measure)
     {
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var limit = StageBudget.Limit(BudgetSeconds, available);
@@ -29,10 +36,16 @@ public static class CpuBenchmark
         try
         {
             // A stage is assigned only when all of its passes finish, so a timeout never exposes a partial aggregate.
-            result.SingleThread = MeasureStage(data, 1, SingleMilliseconds, "Single-thread", budget.Token, progress);
-            result.MultiThread = MeasureStage(data, result.WorkerCount, MultiMilliseconds, "Multithread", budget.Token, progress);
+            result.SingleThread = measure(data, 1, SingleMilliseconds, "Single-thread", budget.Token, progress);
+            result.MultiThread = measure(data, result.WorkerCount, MultiMilliseconds, "Multithread", budget.Token, progress);
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Like RAM and disk: a cancelled stage keeps what finished. The worker still ends the run as Cancelled.
+            result.Status = "Cancelled";
+            result.QualityNotes.Add("CPU stage was cancelled; the unfinished stage has no score and completed stages are kept.");
+        }
+        catch (OperationCanceledException)
         {
             // A busy or slow machine is exactly when a partial answer is most useful: keep completed stages, flag the rest.
             result.Status = "TimedOut";
