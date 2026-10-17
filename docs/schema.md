@@ -15,7 +15,7 @@ A stage that did not run is `null`. A successful run can carry warnings.
 - Every stage has `benchmarkVersion`, `profileHash` and `status`. Pool results only when both version and hash match.
 - `cpu.singleThread` / `cpu.multiThread`: `mBps` (aggregate, the headline), `medianMBps`, `variationPercent` (sample SD / mean),
   `firstToLastChangePercent`, `passes[]` (bytes, duration, participating workers, per-worker bytes, process CPU seconds,
-  average busy logical processors, `outputVerified`). A stage is `null` if it did not finish (`cpu.status` is then `TimedOut`).
+  average busy logical processors, `outputVerified`). A stage is `null` if it did not finish (`cpu.status` is then `TimedOut`, or `Cancelled` when the user cancelled).
 - `cpu.outputVerified` is true only if both stages completed.
 - `memory`: `copyGBps`, `readGBps`, `writeGBps` (single worker), `multiThreadWorkers`, `multiThreadReadGBps`,
   `multiThreadCopyGBps`, `passes[]` (operations `Copy`, `Read`, `Write`, `ReadMT`, `CopyMT`), `variationPercent` per operation,

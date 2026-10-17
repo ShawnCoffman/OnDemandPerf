@@ -167,6 +167,82 @@ Test("ResultStore keeps 50 history pairs, returns the saved path, and can write 
     }
     finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
 });
+Test("A saved run's own text report survives a later run replacing Latest.txt (regression: Open Results showed the wrong run)", () =>
+{
+    string dir = Path.Combine(Path.GetTempPath(), "odp-store-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new ResultStore(dir);
+        string first = store.Save(Sample());
+        string firstText = File.ReadAllText(ResultStore.TextReportPath(first));
+        string second = store.Save(new AnalysisResult { Timestamp = DateTimeOffset.Now.AddMinutes(1), Status = "Failed" });
+        string latest = File.ReadAllText(Path.Combine(dir, "Latest.txt"));
+        Check(ResultStore.TextReportPath(first) == Path.ChangeExtension(first, ".txt"), "text report sits beside the history JSON");
+        Check(File.ReadAllText(ResultStore.TextReportPath(first)) == firstText, "the first run's report is unchanged");
+        Check(latest == File.ReadAllText(ResultStore.TextReportPath(second)) && latest != firstText, "Latest.txt now holds the second run");
+    }
+    finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+});
+
+// ---- CPU stage cancellation (a fake stage measurer; nothing is benchmarked) ----
+CpuMeasurement FakeStage(int workers)
+{
+    var stage = new CpuMeasurement { RequestedWorkers = workers, RequestedMillisecondsPerPass = 1, MBps = 100, OnFastestCoresPercent = 100 };
+    for (int pass = 1; pass <= 3; pass++)
+        stage.Passes.Add(new CpuPass(pass, 1_000_000, 0.01, 100) { ParticipatingWorkers = workers, AverageBusyLogicalProcessors = workers, OutputVerified = true });
+    return stage;
+}
+Test("Cancelling during multithread keeps the completed single-thread stage (regression: cpu was null)", () =>
+{
+    using var user = new CancellationTokenSource();
+    var cpu = CpuBenchmark.Run(user.Token, _ => { }, null, (_, workers, _, name, token, _) =>
+    {
+        if (name == "Single-thread") return FakeStage(workers);
+        user.Cancel(); // the user cancels while multithread is running
+        token.ThrowIfCancellationRequested();
+        throw new InvalidOperationException("unreachable");
+    });
+    Check(cpu.Status == "Cancelled", "status " + cpu.Status);
+    Check(cpu.SingleThread is { Passes.Count: 3 } && cpu.MultiThread is null, "single-thread kept, multithread unscored");
+    Check(!cpu.OutputVerified, "an unfinished stage is not verified");
+    Check(cpu.QualityNotes.Any(n => n.Contains("cancelled")), "the note says why multithread has no score");
+});
+Test("Cancelling before any CPU stage finishes gives an empty Cancelled result instead of throwing", () =>
+{
+    using var user = new CancellationTokenSource();
+    user.Cancel();
+    var cpu = CpuBenchmark.Run(user.Token, _ => { }, null, (_, _, _, _, token, _) => { token.ThrowIfCancellationRequested(); return FakeStage(1); });
+    Check(cpu.Status == "Cancelled" && cpu.SingleThread is null && cpu.MultiThread is null, "status " + cpu.Status);
+});
+Test("A CPU stage that runs out of time is still TimedOut, not Cancelled", () =>
+{
+    var cpu = CpuBenchmark.Run(CancellationToken.None, _ => { }, TimeSpan.Zero, (_, workers, _, name, token, _) =>
+    {
+        if (name == "Single-thread") return FakeStage(workers);
+        token.WaitHandle.WaitOne(TimeSpan.FromSeconds(5)); // a zero time limit cancels the budget almost at once
+        token.ThrowIfCancellationRequested();
+        throw new InvalidOperationException("the stage budget never expired");
+    });
+    Check(cpu.Status == "TimedOut", "status " + cpu.Status);
+    Check(cpu.SingleThread is not null && cpu.MultiThread is null, "completed stage kept");
+});
+Test("A full fake CPU run succeeds and is verified", () =>
+{
+    var cpu = CpuBenchmark.Run(CancellationToken.None, _ => { }, null, (_, workers, _, _, _, _) => FakeStage(workers));
+    Check(cpu.Status == "Success" && cpu.OutputVerified && cpu.QualityNotes.Count == 0, "status " + cpu.Status + "; " + string.Join("; ", cpu.QualityNotes));
+});
+
+// ---- panel sizing ----
+Test("The panel never extends past the working area, and scrolls when it is shorter than its minimum", () =>
+{
+    // Review case: 200% scaling, 984 px working area less 2 x 24 px margins; the 520-logical minimum is 1,040 px.
+    var (height, scroll) = PanelFit.Compute(preferred: 1180, minimum: 1040, available: 984 - 48);
+    Check(height == 936 && scroll == 1040, $"high DPI: height {height}, scroll {scroll}");
+    Check(PanelFit.Compute(590, 520, 1000) == (590, 0), "plenty of room: designed height, no scrolling");
+    Check(PanelFit.Compute(590, 520, 560) == (560, 0), "short screen: shortened above the minimum, no scrolling");
+    Check(PanelFit.Compute(590, 520, 520) == (520, 0), "exactly the minimum still fits");
+    Check(PanelFit.Compute(590, 520, -10).Height == 1, "a nonsensical working area cannot give a zero or negative height");
+});
 
 // ---- summaries and report text ----
 Test("ResultSummary cards for a complete result", () =>

@@ -46,7 +46,8 @@ hardware stability test).
   operation. `corePlacement` says what was applied and `onFastestCoresPercent` how often it was observed on the fastest core
   type (null on CPUs with one core type). Below 90% adds a quality note and a finding. Multithread workers are not steered.
 - If the stage reaches its time limit (its 20 s budget or the time left in the run), completed stages are kept, the unfinished
-  stage has no score, and the stage status is `TimedOut`. User cancellation produces a Cancelled run without a partial aggregate.
+  stage has no score, and the stage status is `TimedOut`. User cancellation keeps completed stages the same way (stage status
+  `Cancelled`, never a partial aggregate for the unfinished stage) and produces a Cancelled run.
 - The result depends on the runtime's Deflate implementation, so the .NET version matters.
 
 ## RAM (`memory-v4`)
